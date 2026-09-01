@@ -1,11 +1,9 @@
 import os
 import time
+import asyncio
 
 from pyrogram import Client, filters
-from pyrogram.enums import ChatType
 from pyrogram.errors import FloodWait
-from pyrogram.session import StringSession
-
 
 API_ID = int(os.environ["API_ID"])
 API_HASH = os.environ["API_HASH"]
@@ -18,99 +16,73 @@ app = Client(
     session_string=SESSION_STRING
 )
 
-# =========================
-# SETTINGS
-# =========================
+AUTO_REPLY = False
+REPLY_TEXT = "👋 Hello! Main abhi available nahi hoon. Tumhara message mil gaya hai ✅"
 
-auto_reply = False
-
-reply_text = (
-    "👋 Hello!\n\n"
-    "Abhi main available nahi hoon.\n"
-    "Message mil gaya hai ✅"
-)
-
-# Same person ko baar-baar reply na ho
+COOLDOWN = 60
 last_reply = {}
-REPLY_COOLDOWN = 60
 
 
-# =========================
-# COMMANDS
-# =========================
+# ---------- COMMANDS ----------
 
 @app.on_message(filters.me & filters.command("on", prefixes="/"))
-async def turn_on(client, message):
-    global auto_reply
-
-    auto_reply = True
-
-    await message.edit_text(
-        "🟢 **Auto Reply ON**\n\n"
-        "Ab incoming private messages ka automatic reply hoga."
-    )
+async def auto_on(client, message):
+    global AUTO_REPLY
+    AUTO_REPLY = True
+    await message.edit_text("🟢 **Auto Reply ON**")
 
 
 @app.on_message(filters.me & filters.command("off", prefixes="/"))
-async def turn_off(client, message):
-    global auto_reply
-
-    auto_reply = False
-
-    await message.edit_text(
-        "🔴 **Auto Reply OFF**"
-    )
+async def auto_off(client, message):
+    global AUTO_REPLY
+    AUTO_REPLY = False
+    await message.edit_text("🔴 **Auto Reply OFF**")
 
 
 @app.on_message(filters.me & filters.command("status", prefixes="/"))
 async def status(client, message):
-    status_text = "🟢 ON" if auto_reply else "🔴 OFF"
+    status = "🟢 ON" if AUTO_REPLY else "🔴 OFF"
 
     await message.edit_text(
         f"🤖 **AR AutoReply Manager**\n\n"
-        f"Status: {status_text}\n"
-        f"Cooldown: `{REPLY_COOLDOWN}s`"
-    )
-
-
-@app.on_message(filters.me & filters.command("reply", prefixes="/"))
-async def show_reply(client, message):
-    await message.edit_text(
-        f"💬 **Current Auto Reply:**\n\n{reply_text}"
+        f"Status: {status}\n"
+        f"Cooldown: `{COOLDOWN}s`"
     )
 
 
 @app.on_message(filters.me & filters.command("setreply", prefixes="/"))
 async def set_reply(client, message):
-    global reply_text
+    global REPLY_TEXT
 
-    text = message.text or ""
-
-    parts = text.split(maxsplit=1)
+    parts = (message.text or "").split(maxsplit=1)
 
     if len(parts) < 2:
         await message.edit_text(
-            "❌ Reply text missing.\n\n"
-            "Example:\n"
-            "`/setreply Hello 👋 Main abhi busy hoon.`"
+            "❌ Text missing!\n\n"
+            "`/setreply Hello 👋 Main busy hoon.`"
         )
         return
 
-    reply_text = parts[1]
+    REPLY_TEXT = parts[1]
 
     await message.edit_text(
-        f"✅ **Auto Reply Updated!**\n\n"
-        f"{reply_text}"
+        "✅ **Auto Reply Updated!**\n\n"
+        + REPLY_TEXT
+    )
+
+
+@app.on_message(filters.me & filters.command("reply", prefixes="/"))
+async def current_reply(client, message):
+    await message.edit_text(
+        "💬 **Current Reply:**\n\n" + REPLY_TEXT
     )
 
 
 @app.on_message(filters.me & filters.command("id", prefixes="/"))
 async def get_id(client, message):
-    chat = message.chat
-
     await message.edit_text(
-        f"🆔 **Chat ID:** `{chat.id}`\n"
-        f"👤 **Your ID:** `{message.from_user.id}`"
+        f"👤 **Your ID:** `{message.from_user.id}`\n"
+        f"💬 **Chat ID:** `{message.chat.id}`"
     )
 
 
@@ -119,63 +91,53 @@ async def help_command(client, message):
     await message.edit_text(
         "🤖 **AR AutoReply Manager**\n\n"
         "⚙️ Commands:\n\n"
-        "`/on` - Auto reply ON\n"
-        "`/off` - Auto reply OFF\n"
-        "`/status` - Check status\n"
-        "`/reply` - Show current reply\n"
-        "`/setreply TEXT` - Change reply\n"
-        "`/id` - Get chat ID\n"
-        "`/help` - Show this menu"
+        "`/on` — Auto Reply ON\n"
+        "`/off` — Auto Reply OFF\n"
+        "`/status` — Status\n"
+        "`/setreply TEXT` — Change reply\n"
+        "`/reply` — Current reply\n"
+        "`/id` — IDs\n"
+        "`/help` — Help"
     )
 
 
-# =========================
-# AUTO REPLY
-# =========================
+# ---------- AUTO REPLY ----------
 
 @app.on_message(
     filters.private
     & ~filters.me
     & ~filters.bot
 )
-async def auto_reply_handler(client, message):
-    global auto_reply
+async def incoming_message(client, message):
 
-    if not auto_reply:
+    if not AUTO_REPLY:
         return
 
     if not message.from_user:
         return
 
     user_id = message.from_user.id
+    now = time.time()
 
-    current_time = time.time()
-    previous_time = last_reply.get(user_id, 0)
-
-    # Cooldown
-    if current_time - previous_time < REPLY_COOLDOWN:
+    if now - last_reply.get(user_id, 0) < COOLDOWN:
         return
 
-    last_reply[user_id] = current_time
+    last_reply[user_id] = now
 
     try:
-        await message.reply_text(reply_text)
+        await message.reply_text(REPLY_TEXT)
 
     except FloodWait as e:
-        print(f"FloodWait: waiting {e.value} seconds")
-        await __import__("asyncio").sleep(e.value)
+        print(f"FloodWait: {e.value} seconds")
+        await asyncio.sleep(e.value)
 
     except Exception as e:
-        print(f"Auto reply error: {e}")
+        print("Auto Reply Error:", e)
 
-
-# =========================
-# START
-# =========================
 
 print("================================")
 print("🤖 AR AutoReply Manager")
-print("🚀 Starting...")
+print("🚀 Railway starting...")
 print("================================")
 
 app.run()
