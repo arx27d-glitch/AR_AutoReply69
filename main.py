@@ -1,91 +1,86 @@
 import os
 import sqlite3
 import time
-from datetime import datetime, timedelta
 
 from pyrogram import Client, filters
-from pyrogram.types import (
-    InlineKeyboardMarkup,
-    InlineKeyboardButton,
-    ChatPermissions,
-    ChatPrivileges,
-)
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 # =========================================================
 # CONFIG
 # =========================================================
 
-API_ID = int(os.getenv("API_ID", "0"))
-API_HASH = os.getenv("API_HASH", "")
-SESSION_STRING = os.getenv("SESSION_STRING", "")
+API_ID = int(os.environ.get("API_ID", "0"))
+API_HASH = os.environ.get("API_HASH", "")
+SESSION_STRING = os.environ.get("SESSION_STRING", "")
 
-if not API_ID or not API_HASH or not SESSION_STRING:
-    raise RuntimeError(
-        "Railway Variables me API_ID, API_HASH aur SESSION_STRING set karo."
-    )
+if API_ID == 0:
+    raise RuntimeError("API_ID missing")
+
+if not API_HASH:
+    raise RuntimeError("API_HASH missing")
+
+if not SESSION_STRING:
+    raise RuntimeError("SESSION_STRING missing")
+
 
 app = Client(
-    "AR_ADVANCED_MANAGER",
+    "AR_MANAGER",
     api_id=API_ID,
     api_hash=API_HASH,
-    session_string=SESSION_STRING,
+    session_string=SESSION_STRING
 )
+
 
 # =========================================================
 # DATABASE
 # =========================================================
 
-DB = "ar_manager.db"
+db = sqlite3.connect(
+    "ar_manager.db",
+    check_same_thread=False
+)
 
-db = sqlite3.connect(DB, check_same_thread=False)
-cur = db.cursor()
-
-cur.execute("""
+db.execute("""
 CREATE TABLE IF NOT EXISTS first_users (
     user_id INTEGER PRIMARY KEY,
     name TEXT,
     username TEXT,
-    first_seen TEXT
+    created INTEGER
 )
 """)
 
-cur.execute("""
+db.execute("""
 CREATE TABLE IF NOT EXISTS settings (
-    key TEXT PRIMARY KEY,
-    value TEXT
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS notes (
     name TEXT PRIMARY KEY,
-    content TEXT
-)
-""")
-
-cur.execute("""
-CREATE TABLE IF NOT EXISTS filters (
-    word TEXT PRIMARY KEY,
-    reply TEXT
+    value TEXT
 )
 """)
 
 db.commit()
 
 
-def get_setting(key, default=None):
-    cur.execute(
-        "SELECT value FROM settings WHERE key=?",
-        (key,)
+def setting(name, default=""):
+    row = db.execute(
+        "SELECT value FROM settings WHERE name=?",
+        (name,)
+    ).fetchone()
+
+    if row:
+        return row[0]
+
+    db.execute(
+        "INSERT INTO settings(name,value) VALUES(?,?)",
+        (name, default)
     )
-    row = cur.fetchone()
-    return row[0] if row else default
+    db.commit()
+
+    return default
 
 
-def set_setting(key, value):
-    cur.execute(
-        "INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
-        (key, str(value))
+def set_setting(name, value):
+    db.execute(
+        "INSERT OR REPLACE INTO settings(name,value) VALUES(?,?)",
+        (name, value)
     )
     db.commit()
 
@@ -94,31 +89,41 @@ def set_setting(key, value):
 # DEFAULT SETTINGS
 # =========================================================
 
-if get_setting("auto_reply") is None:
-    set_setting("auto_reply", "1")
+setting("auto_reply", "on")
 
-if get_setting("welcome") is None:
-    set_setting(
-        "welcome",
-        "👋 Welcome {name}!\n\n🤖 Welcome to the group."
-    )
+setting(
+    "reply_text",
+    "╭━━〔 👋 𝐇𝐄𝐋𝐋𝐎 〕━━╮\n"
+    "│\n"
+    "│ Hello {name}! 👋\n"
+    "│ Tumhara message mil gaya.\n"
+    "│ Main abhi available nahi hoon.\n"
+    "│\n"
+    "╰━━━━━━━━━━━━━━╯"
+)
 
-if get_setting("first_reply") is None:
-    set_setting(
-        "first_reply",
-        "╭━━〔 👋 𝐇𝐄𝐋𝐋𝐎 〕━━╮\n"
-        "│\n"
-        "│ 𝐇𝐞𝐥𝐥𝐨 {name}! 👋\n"
-        "│\n"
-        "│ 📩 Tumhara message mil gaya.\n"
-        "│ Main abhi available nahi hoon.\n"
-        "│\n"
-        "╰━━━━━━━━━━━━━━╯"
-    )
+setting(
+    "welcome_text",
+    "👋 Welcome {name}!\n"
+    "Group mein welcome! 🎉"
+)
 
 
 # =========================================================
-# AUTO REPLY — ONLY FIRST DM
+# VARIABLES
+# =========================================================
+
+AFK = False
+AFK_REASON = ""
+AFK_TIME = 0
+
+afk_users = set()
+
+xo_games = {}
+
+
+# =========================================================
+# FIRST DM AUTO REPLY
 # =========================================================
 
 @app.on_message(
@@ -126,9 +131,9 @@ if get_setting("first_reply") is None:
     & ~filters.me
     & ~filters.bot
 )
-async def first_message_reply(client, message):
+async def first_dm(client, message):
 
-    if get_setting("auto_reply", "1") != "1":
+    if setting("auto_reply", "on") != "on":
         return
 
     user = message.from_user
@@ -136,14 +141,12 @@ async def first_message_reply(client, message):
     if not user:
         return
 
-    uid = user.id
+    user_id = user.id
 
-    cur.execute(
+    exists = db.execute(
         "SELECT user_id FROM first_users WHERE user_id=?",
-        (uid,)
-    )
-
-    exists = cur.fetchone()
+        (user_id,)
+    ).fetchone()
 
     if exists:
         return
@@ -151,115 +154,46 @@ async def first_message_reply(client, message):
     name = user.first_name or "Friend"
     username = user.username or ""
 
-    cur.execute(
+    db.execute(
         """
         INSERT OR IGNORE INTO first_users
-        (user_id,name,username,first_seen)
-        VALUES (?,?,?,?)
+        (user_id,name,username,created)
+        VALUES(?,?,?,?)
         """,
         (
-            uid,
+            user_id,
             name,
             username,
-            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            int(time.time())
         )
     )
 
     db.commit()
 
-    reply = get_setting("first_reply")
+    text = setting("reply_text")
 
-    reply = reply.replace("{name}", name)
-    reply = reply.replace(
+    text = text.replace("{name}", name)
+    text = text.replace(
         "{username}",
-        f"@{username}" if username else name
+        "@" + username if username else name
     )
 
     try:
-        await message.reply_text(reply)
+        await message.reply_text(text)
     except Exception as e:
-        print("AUTO REPLY ERROR:", e)
+        print("AutoReply:", e)
 
 
 # =========================================================
-# /ON
-# =========================================================
-
-@app.on_message(
-    filters.me & filters.command("on", prefixes="/")
-)
-async def auto_on(client, message):
-
-    set_setting("auto_reply", "1")
-
-    await message.edit_text(
-        "╭━━〔 🟢 𝐀𝐔𝐓𝐎 𝐑𝐄𝐏𝐋𝐘 〕━━╮\n"
-        "│\n"
-        "│ ✅ Status: ON\n"
-        "│ 👤 Sirf FIRST DM par reply\n"
-        "│\n"
-        "╰━━━━━━━━━━━━━━━━╯"
-    )
-
-
-# =========================================================
-# /OFF
-# =========================================================
-
-@app.on_message(
-    filters.me & filters.command("off", prefixes="/")
-)
-async def auto_off(client, message):
-
-    set_setting("auto_reply", "0")
-
-    await message.edit_text(
-        "╭━━〔 🔴 𝐀𝐔𝐓𝐎 𝐑𝐄𝐏𝐋𝐘 〕━━╮\n"
-        "│\n"
-        "│ ❌ Status: OFF\n"
-        "│\n"
-        "╰━━━━━━━━━━━━━━━━╯"
-    )
-
-
-# =========================================================
-# /WELCOME
-# =========================================================
-
-@app.on_message(
-    filters.me & filters.command("welcome", prefixes="/")
-)
-async def welcome_command(client, message):
-
-    parts = (message.text or "").split(maxsplit=1)
-
-    if len(parts) == 1:
-        current = get_setting("welcome")
-        await message.edit_text(
-            "📢 **Current Welcome:**\n\n"
-            f"{current}\n\n"
-            "Change:\n"
-            "`/welcome Welcome {name} 👋`"
-        )
-        return
-
-    set_setting("welcome", parts[1])
-
-    await message.edit_text(
-        "✅ **Welcome message updated!**"
-    )
-
-
-# =========================================================
-# NEW MEMBER WELCOME
+# WELCOME NEW MEMBERS
 # =========================================================
 
 @app.on_message(
     filters.group & filters.new_chat_members
 )
-async def new_member(client, message):
+async def welcome(client, message):
 
-    template = get_setting("welcome")
+    template = setting("welcome_text")
 
     for user in message.new_chat_members:
 
@@ -270,192 +204,733 @@ async def new_member(client, message):
             name
         )
 
-        text = text.replace(
-            "{username}",
-            f"@{user.username}"
-            if user.username
-            else name
-        )
-
         try:
             await message.reply_text(text)
         except Exception as e:
-            print("WELCOME ERROR:", e)
+            print("Welcome:", e)
 
 
 # =========================================================
-# /SETREPLY
+# SELF COMMAND HANDLER
 # =========================================================
 
 @app.on_message(
-    filters.me & filters.command("setreply", prefixes="/")
+    filters.me & filters.text
 )
-async def set_reply(client, message):
+async def commands(client, message):
 
-    parts = (message.text or "").split(maxsplit=1)
+    global AFK
+    global AFK_REASON
+    global AFK_TIME
 
-    if len(parts) < 2:
-        await message.edit_text(
-            "❌ Example:\n"
-            "`/setreply Hello {name} 👋`"
+    text = message.text.strip()
+
+    if not text.startswith("/"):
+        return
+
+    parts = text.split(maxsplit=1)
+
+    command = parts[0].lower()
+
+    if "@" in command:
+        command = command.split("@")[0]
+
+    argument = parts[1] if len(parts) > 1 else ""
+
+
+    # =====================================================
+    # PING
+    # =====================================================
+
+    if command == "/ping":
+
+        await message.reply_text(
+            "🏓 **PONG!**\n"
+            "🤖 AR Manager is working ✅"
         )
         return
 
-    set_setting("first_reply", parts[1])
 
-    await message.edit_text(
-        "✅ **First DM auto-reply updated!**"
-    )
+    # =====================================================
+    # TEST
+    # =====================================================
+
+    if command == "/test":
+
+        await message.reply_text(
+            "╭━━〔 🧪 TEST 〕━━╮\n"
+            "│\n"
+            "│ ✅ Pyrogram: Working\n"
+            "│ ✅ Session: Working\n"
+            "│ ✅ Commands: Working\n"
+            "│\n"
+            "╰━━━━━━━━━━━━╯"
+        )
+        return
 
 
-# =========================================================
-# /RESETUSER
-# =========================================================
+    # =====================================================
+    # ON
+    # =====================================================
 
-@app.on_message(
-    filters.me & filters.command("resetuser", prefixes="/")
-)
-async def reset_user(client, message):
+    if command == "/on":
 
-    parts = (message.text or "").split()
+        set_setting("auto_reply", "on")
 
-    if len(parts) < 2:
+        await message.reply_text(
+            "🟢 **AUTO REPLY ON**\n\n"
+            "📩 Sirf first-time DM par reply hoga."
+        )
+        return
+
+
+    # =====================================================
+    # OFF
+    # =====================================================
+
+    if command == "/off":
+
+        set_setting("auto_reply", "off")
+
+        await message.reply_text(
+            "🔴 **AUTO REPLY OFF**"
+        )
+        return
+
+
+    # =====================================================
+    # SETREPLY
+    # =====================================================
+
+    if command == "/setreply":
+
+        if not argument:
+
+            await message.reply_text(
+                "❌ Example:\n\n"
+                "`/setreply Hello {name} 👋`"
+            )
+            return
+
+        set_setting(
+            "reply_text",
+            argument
+        )
+
+        await message.reply_text(
+            "✅ First DM reply updated."
+        )
+        return
+
+
+    # =====================================================
+    # WELCOME
+    # =====================================================
+
+    if command == "/welcome":
+
+        if not argument:
+
+            await message.reply_text(
+                "📢 Current welcome:\n\n"
+                f"{setting('welcome_text')}\n\n"
+                "Change:\n"
+                "`/welcome Welcome {name} 👋`"
+            )
+            return
+
+        set_setting(
+            "welcome_text",
+            argument
+        )
+
+        await message.reply_text(
+            "✅ Welcome message updated."
+        )
+        return
+
+
+    # =====================================================
+    # STATUS
+    # =====================================================
+
+    if command == "/status":
+
+        count = db.execute(
+            "SELECT COUNT(*) FROM first_users"
+        ).fetchone()[0]
+
+        await message.reply_text(
+            "╭━━〔 📊 AR STATUS 〕━━╮\n"
+            "│\n"
+            f"│ 📩 Auto Reply: "
+            f"{'🟢 ON' if setting('auto_reply') == 'on' else '🔴 OFF'}\n"
+            f"│ 👥 First Contacts: {count}\n"
+            f"│ 💤 AFK: {'🟢 ON' if AFK else '🔴 OFF'}\n"
+            f"│ 🎮 Active XO: {len(xo_games)}\n"
+            "│\n"
+            "╰━━━━━━━━━━━━━━━━╯"
+        )
+        return
+
+
+    # =====================================================
+    # ID
+    # =====================================================
+
+    if command == "/id":
 
         if message.reply_to_message:
             user = message.reply_to_message.from_user
 
             if user:
-                uid = user.id
-            else:
-                await message.edit_text("❌ User not found.")
+                await message.reply_text(
+                    "🆔 **USER INFO**\n\n"
+                    f"👤 Name: {user.first_name}\n"
+                    f"🆔 ID: `{user.id}`\n"
+                    f"🔗 Username: "
+                    f"`@{user.username}`"
+                    if user.username
+                    else
+                    "🆔 **USER INFO**\n\n"
+                    f"👤 Name: {user.first_name}\n"
+                    f"🆔 ID: `{user.id}`"
+                )
                 return
-        else:
-            await message.edit_text(
+
+        await message.reply_text(
+            "🆔 **CHAT INFO**\n\n"
+            f"💬 Chat ID: `{message.chat.id}`"
+        )
+        return
+
+
+    # =====================================================
+    # RESET USER
+    # =====================================================
+
+    if command == "/resetuser":
+
+        user_id = None
+
+        if message.reply_to_message:
+            if message.reply_to_message.from_user:
+                user_id = message.reply_to_message.from_user.id
+
+        elif argument:
+
+            try:
+                user_id = int(argument.split()[0])
+            except:
+                pass
+
+        if not user_id:
+
+            await message.reply_text(
                 "❌ Reply to user or use:\n"
                 "`/resetuser USER_ID`"
             )
             return
-    else:
-        try:
-            uid = int(parts[1])
-        except ValueError:
-            await message.edit_text("❌ Invalid User ID.")
-            return
 
-    cur.execute(
-        "DELETE FROM first_users WHERE user_id=?",
-        (uid,)
-    )
+        db.execute(
+            "DELETE FROM first_users WHERE user_id=?",
+            (user_id,)
+        )
 
-    db.commit()
+        db.commit()
 
-    await message.edit_text(
-        f"✅ First-message status reset for `{uid}`"
-    )
-
-
-# =========================================================
-# /LISTUSERS
-# =========================================================
-
-@app.on_message(
-    filters.me & filters.command("listusers", prefixes="/")
-)
-async def list_users(client, message):
-
-    cur.execute(
-        """
-        SELECT user_id,name,username,first_seen
-        FROM first_users
-        ORDER BY first_seen DESC
-        LIMIT 30
-        """
-    )
-
-    rows = cur.fetchall()
-
-    if not rows:
-        await message.edit_text(
-            "📭 **No first-contact users yet.**"
+        await message.reply_text(
+            f"✅ User `{user_id}` reset.\n"
+            "Next DM par first-time reply milega."
         )
         return
 
-    text = "╭━━〔 👥 𝐅𝐈𝐑𝐒𝐓 𝐂𝐎𝐍𝐓𝐀𝐂𝐓𝐒 〕━━╮\n│\n"
 
-    for uid, name, username, date in rows:
+    # =====================================================
+    # LIST USERS
+    # =====================================================
 
-        text += (
-            f"│ 👤 {name}\n"
-            f"│ 🆔 `{uid}`\n"
-            f"│ 🕒 {date}\n"
+    if command == "/listusers":
+
+        rows = db.execute(
+            """
+            SELECT user_id,name,username
+            FROM first_users
+            ORDER BY created DESC
+            LIMIT 20
+            """
+        ).fetchall()
+
+        if not rows:
+
+            await message.reply_text(
+                "📭 No first-contact users."
+            )
+            return
+
+        output = (
+            "╭━━〔 👥 FIRST CONTACTS 〕━━╮\n"
             "│\n"
         )
 
-    text += "╰━━━━━━━━━━━━━━━━━━━━╯"
+        for uid, name, username in rows:
 
-    await message.edit_text(text)
+            output += (
+                f"│ 👤 {name}\n"
+                f"│ 🆔 `{uid}`\n"
+            )
+
+            if username:
+                output += f"│ 🔗 @{username}\n"
+
+            output += "│\n"
+
+        output += "╰━━━━━━━━━━━━━━━━━━╯"
+
+        await message.reply_text(output)
+        return
+
+
+    # =====================================================
+    # CLEAR USERS
+    # =====================================================
+
+    if command == "/clearusers":
+
+        db.execute(
+            "DELETE FROM first_users"
+        )
+
+        db.commit()
+
+        await message.reply_text(
+            "🗑️ First-contact database cleared."
+        )
+        return
+
+
+    # =====================================================
+    # AFK
+    # =====================================================
+
+    if command == "/afk":
+
+        AFK = True
+        AFK_TIME = time.time()
+        AFK_REASON = (
+            argument
+            if argument
+            else "Busy right now."
+        )
+
+        afk_users.clear()
+
+        await message.reply_text(
+            "💤 **AFK MODE ON**\n\n"
+            f"📝 {AFK_REASON}"
+        )
+        return
+
+
+    # =====================================================
+    # NOTE
+    # =====================================================
+
+    if command == "/note":
+
+        p = argument.split(maxsplit=1)
+
+        if len(p) < 2:
+
+            await message.reply_text(
+                "❌ Example:\n"
+                "`/note study Physics chapter 1`"
+            )
+            return
+
+        name = p[0].lower()
+        content = p[1]
+
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notes(
+                name TEXT PRIMARY KEY,
+                content TEXT
+            )
+            """
+        )
+
+        db.execute(
+            "INSERT OR REPLACE INTO notes VALUES(?,?)",
+            (name, content)
+        )
+
+        db.commit()
+
+        await message.reply_text(
+            f"📝 Note `{name}` saved."
+        )
+        return
+
+
+    # =====================================================
+    # GET NOTE
+    # =====================================================
+
+    if command == "/getnote":
+
+        if not argument:
+
+            await message.reply_text(
+                "`/getnote NAME`"
+            )
+            return
+
+        db.execute(
+            """
+            CREATE TABLE IF NOT EXISTS notes(
+                name TEXT PRIMARY KEY,
+                content TEXT
+            )
+            """
+        )
+
+        row = db.execute(
+            "SELECT content FROM notes WHERE name=?",
+            (argument.lower(),)
+        ).fetchone()
+
+        if not row:
+
+            await message.reply_text(
+                "❌ Note not found."
+            )
+            return
+
+        await message.reply_text(
+            f"📝 **{argument}**\n\n"
+            f"{row[0]}"
+        )
+        return
+
+
+    # =====================================================
+    # BAN
+    # =====================================================
+
+    if command == "/ban":
+
+        if not message.reply_to_message:
+
+            await message.reply_text(
+                "❌ User ke message par reply karo."
+            )
+            return
+
+        user = message.reply_to_message.from_user
+
+        if not user:
+            return
+
+        try:
+
+            await client.ban_chat_member(
+                message.chat.id,
+                user.id
+            )
+
+            await message.reply_text(
+                f"🔨 **BANNED**\n"
+                f"👤 {user.first_name}\n"
+                f"🆔 `{user.id}`"
+            )
+
+        except Exception as e:
+
+            await message.reply_text(
+                f"❌ Ban Error:\n`{e}`"
+            )
+
+        return
+
+
+    # =====================================================
+    # UNBAN
+    # =====================================================
+
+    if command == "/unban":
+
+        if not argument:
+
+            await message.reply_text(
+                "`/unban USER_ID`"
+            )
+            return
+
+        try:
+
+            uid = int(argument.split()[0])
+
+            await client.unban_chat_member(
+                message.chat.id,
+                uid
+            )
+
+            await message.reply_text(
+                f"✅ Unbanned `{uid}`"
+            )
+
+        except Exception as e:
+
+            await message.reply_text(
+                f"❌ Error:\n`{e}`"
+            )
+
+        return
+
+
+    # =====================================================
+    # KICK
+    # =====================================================
+
+    if command == "/kick":
+
+        if not message.reply_to_message:
+
+            await message.reply_text(
+                "❌ User ke message par reply karo."
+            )
+            return
+
+        user = message.reply_to_message.from_user
+
+        if not user:
+            return
+
+        try:
+
+            await client.ban_chat_member(
+                message.chat.id,
+                user.id
+            )
+
+            await client.unban_chat_member(
+                message.chat.id,
+                user.id
+            )
+
+            await message.reply_text(
+                f"👢 **KICKED** `{user.id}`"
+            )
+
+        except Exception as e:
+
+            await message.reply_text(
+                f"❌ Error:\n`{e}`"
+            )
+
+        return
+
+
+    # =====================================================
+    # MUTE
+    # =====================================================
+
+    if command == "/mute":
+
+        if not message.reply_to_message:
+
+            await message.reply_text(
+                "❌ User ke message par reply karo."
+            )
+            return
+
+        user = message.reply_to_message.from_user
+
+        if not user:
+            return
+
+        try:
+
+            await client.restrict_chat_member(
+                message.chat.id,
+                user.id,
+                permissions={
+                    "can_send_messages": False
+                }
+            )
+
+            await message.reply_text(
+                f"🔇 **MUTED** `{user.id}`"
+            )
+
+        except Exception as e:
+
+            await message.reply_text(
+                f"❌ Mute Error:\n`{e}`"
+            )
+
+        return
+
+
+    # =====================================================
+    # UNMUTE
+    # =====================================================
+
+    if command == "/unmute":
+
+        if not message.reply_to_message:
+
+            await message.reply_text(
+                "❌ User ke message par reply karo."
+            )
+            return
+
+        user = message.reply_to_message.from_user
+
+        if not user:
+            return
+
+        try:
+
+            await client.restrict_chat_member(
+                message.chat.id,
+                user.id,
+                permissions={
+                    "can_send_messages": True,
+                    "can_send_media_messages": True,
+                    "can_send_other_messages": True,
+                    "can_add_web_page_previews": True
+                }
+            )
+
+            await message.reply_text(
+                f"🔊 **UNMUTED** `{user.id}`"
+            )
+
+        except Exception as e:
+
+            await message.reply_text(
+                f"❌ Error:\n`{e}`"
+            )
+
+        return
+
+
+    # =====================================================
+    # DELETE
+    # =====================================================
+
+    if command == "/del":
+
+        if not message.reply_to_message:
+
+            await message.reply_text(
+                "❌ Message par reply karo."
+            )
+            return
+
+        try:
+
+            await message.reply_to_message.delete()
+            await message.delete()
+
+        except Exception as e:
+
+            print("Delete:", e)
+
+        return
+
+
+    # =====================================================
+    # PIN
+    # =====================================================
+
+    if command == "/pin":
+
+        if not message.reply_to_message:
+
+            await message.reply_text(
+                "❌ Message par reply karo."
+            )
+            return
+
+        try:
+
+            await message.reply_to_message.pin()
+
+            await message.reply_text(
+                "📌 **MESSAGE PINNED ✅**"
+            )
+
+        except Exception as e:
+
+            await message.reply_text(
+                f"❌ Pin Error:\n`{e}`"
+            )
+
+        return
+
+
+    # =====================================================
+    # HELP
+    # =====================================================
+
+    if command == "/help":
+
+        await message.reply_text(
+            "╭━━━〔 🤖 AR MANAGER 〕━━━╮\n"
+            "│\n"
+            "│ ⚡ BASIC\n"
+            "│ /ping\n"
+            "│ /test\n"
+            "│ /status\n"
+            "│ /id\n"
+            "│\n"
+            "│ 📩 AUTO REPLY\n"
+            "│ /on\n"
+            "│ /off\n"
+            "│ /setreply TEXT\n"
+            "│ /resetuser ID\n"
+            "│ /listusers\n"
+            "│ /clearusers\n"
+            "│\n"
+            "│ 👋 WELCOME\n"
+            "│ /welcome TEXT\n"
+            "│\n"
+            "│ 💤 AFK\n"
+            "│ /afk REASON\n"
+            "│\n"
+            "│ 📝 NOTES\n"
+            "│ /note NAME TEXT\n"
+            "│ /getnote NAME\n"
+            "│\n"
+            "│ 🛡️ GROUP\n"
+            "│ /ban\n"
+            "│ /unban ID\n"
+            "│ /kick\n"
+            "│ /mute\n"
+            "│ /unmute\n"
+            "│ /pin\n"
+            "│ /del\n"
+            "│\n"
+            "│ 🎮 GAME\n"
+            "│ /xo\n"
+            "│\n"
+            "╰━━━━━━━━━━━━━━━━━━╯"
+        )
+        return
 
 
 # =========================================================
-# /CLEARUSERS
+# AFK RESPONSE
 # =========================================================
-
-@app.on_message(
-    filters.me & filters.command("clearusers", prefixes="/")
-)
-async def clear_users(client, message):
-
-    cur.execute("DELETE FROM first_users")
-    db.commit()
-
-    await message.edit_text(
-        "🗑️ **First-contact database cleared.**"
-    )
-
-
-# =========================================================
-# AFK
-# =========================================================
-
-AFK = False
-AFK_REASON = ""
-AFK_TIME = 0
-afk_notified = set()
-
-
-@app.on_message(
-    filters.me & filters.command("afk", prefixes="/")
-)
-async def afk_on(client, message):
-
-    global AFK, AFK_REASON, AFK_TIME
-
-    parts = (message.text or "").split(maxsplit=1)
-
-    AFK = True
-    AFK_TIME = time.time()
-
-    AFK_REASON = (
-        parts[1]
-        if len(parts) > 1
-        else "Busy right now."
-    )
-
-    afk_notified.clear()
-
-    await message.edit_text(
-        "💤 **𝐀𝐅𝐊 𝐌𝐎𝐃𝐄 𝐎𝐍**\n\n"
-        f"📝 {AFK_REASON}"
-    )
-
 
 @app.on_message(
     ~filters.me
     & ~filters.bot
 )
-async def afk_reply(client, message):
-
-    global AFK
+async def afk_response(client, message):
 
     if not AFK:
         return
@@ -465,499 +940,89 @@ async def afk_reply(client, message):
 
     uid = message.from_user.id
 
-    if uid in afk_notified:
+    if uid in afk_users:
         return
 
-    afk_notified.add(uid)
+    afk_users.add(uid)
 
     minutes = int(
         (time.time() - AFK_TIME) / 60
     )
 
     try:
+
         await message.reply_text(
-            "💤 **𝐀𝐅𝐊**\n\n"
-            f"👤 {message.from_user.first_name}\n"
+            "💤 **AFK**\n\n"
             f"📝 {AFK_REASON}\n"
-            f"⏱️ AFK: {minutes} min"
+            f"⏱️ {minutes} minute(s)"
         )
+
     except Exception:
         pass
 
 
-@app.on_message(
-    filters.me
-)
-async def afk_off_detector(client, message):
-
-    global AFK
-
-    if not AFK:
-        return
-
-    if not (message.text or "").startswith("/afk"):
-
-        AFK = False
-        afk_notified.clear()
-
-        try:
-            await message.reply_text(
-                "🟢 **Welcome back! AFK mode OFF.**"
-            )
-        except Exception:
-            pass
-
-
 # =========================================================
-# NOTES
+# XO FUNCTIONS
 # =========================================================
 
-@app.on_message(
-    filters.me & filters.command("note", prefixes="/")
-)
-async def note_command(client, message):
+def xo_keyboard(board):
 
-    parts = (message.text or "").split(maxsplit=2)
+    rows = []
 
-    if len(parts) < 3:
-        await message.edit_text(
-            "❌ Example:\n"
-            "`/note study Physics chapter 1`"
-        )
-        return
+    for r in range(3):
 
-    name = parts[1].lower()
-    content = parts[2]
+        row = []
 
-    cur.execute(
-        "INSERT OR REPLACE INTO notes(name,content)"
-        " VALUES(?,?)",
-        (name, content)
-    )
+        for c in range(3):
 
-    db.commit()
+            i = r * 3 + c
 
-    await message.edit_text(
-        f"📝 Note `{name}` saved!"
-    )
-
-
-@app.on_message(
-    filters.me & filters.command("getnote", prefixes="/")
-)
-async def get_note(client, message):
-
-    parts = (message.text or "").split()
-
-    if len(parts) < 2:
-        await message.edit_text(
-            "❌ `/getnote NAME`"
-        )
-        return
-
-    name = parts[1].lower()
-
-    cur.execute(
-        "SELECT content FROM notes WHERE name=?",
-        (name,)
-    )
-
-    row = cur.fetchone()
-
-    if not row:
-        await message.edit_text(
-            "❌ Note not found."
-        )
-        return
-
-    await message.edit_text(
-        f"📝 **{name}**\n\n{row[0]}"
-    )
-
-
-@app.on_message(
-    filters.me & filters.command("delnote", prefixes="/")
-)
-async def delete_note(client, message):
-
-    parts = (message.text or "").split()
-
-    if len(parts) < 2:
-        await message.edit_text(
-            "❌ `/delnote NAME`"
-        )
-        return
-
-    name = parts[1].lower()
-
-    cur.execute(
-        "DELETE FROM notes WHERE name=?",
-        (name,)
-    )
-
-    db.commit()
-
-    await message.edit_text(
-        f"🗑️ Note `{name}` deleted."
-    )
-
-
-# =========================================================
-# GROUP MANAGER
-# =========================================================
-
-@app.on_message(
-    filters.me & filters.command("ban", prefixes="/") & filters.group
-)
-async def ban_user(client, message):
-
-    if not message.reply_to_message:
-        await message.edit_text(
-            "❌ User ke message par reply karo."
-        )
-        return
-
-    user = message.reply_to_message.from_user
-
-    if not user:
-        return
-
-    try:
-
-        await client.ban_chat_member(
-            message.chat.id,
-            user.id
-        )
-
-        await message.edit_text(
-            f"🔨 **𝐁𝐀𝐍𝐍𝐄𝐃**\n"
-            f"👤 {user.first_name}\n"
-            f"🆔 `{user.id}`"
-        )
-
-    except Exception as e:
-        await message.edit_text(
-            f"❌ Ban Error:\n`{e}`"
-        )
-
-
-@app.on_message(
-    filters.me & filters.command("kick", prefixes="/") & filters.group
-)
-async def kick_user(client, message):
-
-    if not message.reply_to_message:
-        await message.edit_text(
-            "❌ User ke message par reply karo."
-        )
-        return
-
-    user = message.reply_to_message.from_user
-
-    if not user:
-        return
-
-    try:
-
-        await client.ban_chat_member(
-            message.chat.id,
-            user.id
-        )
-
-        await client.unban_chat_member(
-            message.chat.id,
-            user.id
-        )
-
-        await message.edit_text(
-            f"👢 **𝐊𝐈𝐂𝐊𝐄𝐃** `{user.id}`"
-        )
-
-    except Exception as e:
-        await message.edit_text(
-            f"❌ Kick Error:\n`{e}`"
-        )
-
-
-@app.on_message(
-    filters.me & filters.command("mute", prefixes="/") & filters.group
-)
-async def mute_user(client, message):
-
-    if not message.reply_to_message:
-        await message.edit_text(
-            "❌ User ke message par reply karo."
-        )
-        return
-
-    user = message.reply_to_message.from_user
-
-    if not user:
-        return
-
-    try:
-
-        until = datetime.now() + timedelta(hours=1)
-
-        await client.restrict_chat_member(
-            message.chat.id,
-            user.id,
-            permissions=ChatPermissions(),
-            until_date=until
-        )
-
-        await message.edit_text(
-            f"🔇 **𝐌𝐔𝐓𝐄𝐃 𝟏 𝐇𝐎𝐔𝐑**\n"
-            f"👤 `{user.id}`"
-        )
-
-    except Exception as e:
-        await message.edit_text(
-            f"❌ Mute Error:\n`{e}`"
-        )
-
-
-@app.on_message(
-    filters.me & filters.command("unmute", prefixes="/") & filters.group
-)
-async def unmute_user(client, message):
-
-    if not message.reply_to_message:
-        await message.edit_text(
-            "❌ User ke message par reply karo."
-        )
-        return
-
-    user = message.reply_to_message.from_user
-
-    if not user:
-        return
-
-    try:
-
-        permissions = ChatPermissions(
-            can_send_messages=True,
-            can_send_media_messages=True,
-            can_send_other_messages=True,
-            can_add_web_page_previews=True
-        )
-
-        await client.restrict_chat_member(
-            message.chat.id,
-            user.id,
-            permissions=permissions
-        )
-
-        await message.edit_text(
-            f"🔊 **𝐔𝐍𝐌𝐔𝐓𝐄𝐃** `{user.id}`"
-        )
-
-    except Exception as e:
-        await message.edit_text(
-            f"❌ Unmute Error:\n`{e}`"
-        )
-
-
-@app.on_message(
-    filters.me & filters.command("del", prefixes="/") & filters.group
-)
-async def delete_message(client, message):
-
-    if not message.reply_to_message:
-        await message.edit_text(
-            "❌ Message par reply karo."
-        )
-        return
-
-    try:
-
-        await message.reply_to_message.delete()
-        await message.delete()
-
-    except Exception as e:
-        print("Delete Error:", e)
-
-
-@app.on_message(
-    filters.me & filters.command("pin", prefixes="/") & filters.group
-)
-async def pin_message(client, message):
-
-    if not message.reply_to_message:
-        await message.edit_text(
-            "❌ Message par reply karo."
-        )
-        return
-
-    try:
-
-        await message.reply_to_message.pin()
-
-        await message.edit_text(
-            "📌 **𝐏𝐈𝐍𝐍𝐄𝐃 ✅**"
-        )
-
-    except Exception as e:
-        await message.edit_text(
-            f"❌ Pin Error:\n`{e}`"
-        )
-
-
-# =========================================================
-# PROMOTE
-# =========================================================
-
-@app.on_message(
-    filters.me & filters.command("promote", prefixes="/") & filters.group
-)
-async def promote(client, message):
-
-    if not message.reply_to_message:
-        await message.edit_text(
-            "❌ User ke message par reply karo."
-        )
-        return
-
-    user = message.reply_to_message.from_user
-
-    if not user:
-        return
-
-    try:
-
-        privileges = ChatPrivileges(
-            can_manage_chat=True,
-            can_delete_messages=True,
-            can_restrict_members=True,
-            can_invite_users=True,
-            can_pin_messages=True,
-            can_manage_video_chats=True,
-            can_change_info=True,
-            can_promote_members=False,
-        )
-
-        await client.promote_chat_member(
-            message.chat.id,
-            user.id,
-            privileges=privileges
-        )
-
-        await message.edit_text(
-            f"👑 **𝐏𝐑𝐎𝐌𝐎𝐓𝐄𝐃**\n"
-            f"👤 `{user.id}`"
-        )
-
-    except Exception as e:
-        await message.edit_text(
-            f"❌ Promote Error:\n`{e}`"
-        )
-
-
-# =========================================================
-# DEMOTE
-# =========================================================
-
-@app.on_message(
-    filters.me & filters.command("demote", prefixes="/") & filters.group
-)
-async def demote(client, message):
-
-    if not message.reply_to_message:
-        await message.edit_text(
-            "❌ User ke message par reply karo."
-        )
-        return
-
-    user = message.reply_to_message.from_user
-
-    if not user:
-        return
-
-    try:
-
-        await client.promote_chat_member(
-            message.chat.id,
-            user.id,
-            privileges=ChatPrivileges()
-        )
-
-        await message.edit_text(
-            f"⬇️ **𝐃𝐄𝐌𝐎𝐓𝐄𝐃** `{user.id}`"
-        )
-
-    except Exception as e:
-        await message.edit_text(
-            f"❌ Demote Error:\n`{e}`"
-        )
-
-
-# =========================================================
-# 🎮 TIC TAC TOE
-# =========================================================
-
-games = {}
-
-
-def board_keyboard(board):
-
-    buttons = []
-
-    for row in range(3):
-
-        line = []
-
-        for col in range(3):
-
-            index = row * 3 + col
-
-            value = board[index]
-
-            if value == "X":
+            if board[i] == "X":
                 text = "❌"
 
-            elif value == "O":
+            elif board[i] == "O":
                 text = "⭕"
 
             else:
                 text = "▫️"
 
-            line.append(
+            row.append(
                 InlineKeyboardButton(
                     text,
-                    callback_data=f"XO:{index}"
+                    callback_data=f"XO_MOVE_{i}"
                 )
             )
 
-        buttons.append(line)
+        rows.append(row)
 
-    buttons.append([
+    rows.append([
         InlineKeyboardButton(
-            "🔄 𝐍𝐄𝐖",
+            "🔄 NEW GAME",
             callback_data="XO_NEW"
         ),
         InlineKeyboardButton(
-            "✖️ 𝐂𝐋𝐎𝐒𝐄",
+            "✖️ CLOSE",
             callback_data="XO_CLOSE"
         )
     ])
 
-    return InlineKeyboardMarkup(buttons)
+    return InlineKeyboardMarkup(rows)
 
 
-def check_winner(board):
+def xo_winner(board):
 
     wins = [
-        (0, 1, 2),
-        (3, 4, 5),
-        (6, 7, 8),
-        (0, 3, 6),
-        (1, 4, 7),
-        (2, 5, 8),
-        (0, 4, 8),
-        (2, 4, 6)
+        (0,1,2),
+        (3,4,5),
+        (6,7,8),
+        (0,3,6),
+        (1,4,7),
+        (2,5,8),
+        (0,4,8),
+        (2,4,6)
     ]
 
-    for a, b, c in wins:
+    for a,b,c in wins:
 
         if (
             board[a]
@@ -972,44 +1037,38 @@ def check_winner(board):
     return None
 
 
-def game_header(game):
-
-    x = game["x_name"]
-    o = game["o_name"] or "Waiting..."
-
-    turn = (
-        f"❌ {x}"
-        if game["turn"] == "X"
-        else f"⭕ {o}"
-    )
+def xo_text(game):
 
     return (
-        "╭━━━〔 🎮 𝐓𝐈𝐂 𝐓𝐀𝐂 𝐓𝐎𝐄 〕━━━╮\n"
+        "╭━━〔 🎮 TIC TAC TOE 〕━━╮\n"
         "│\n"
-        f"│ ❌ X : {x}\n"
-        f"│ ⭕ O : {o}\n"
+        f"│ ❌ X: {game['x_name']}\n"
+        f"│ ⭕ O: "
+        f"{game['o_name'] or 'Waiting...'}\n"
         "│\n"
-        f"│ 🎯 Turn : {turn}\n"
+        f"│ 🎯 Turn: "
+        f"{'❌ X' if game['turn']=='X' else '⭕ O'}\n"
         "│\n"
-        "╰━━━━━━━━━━━━━━━━━━━━╯"
+        "╰━━━━━━━━━━━━━━━━╯"
     )
 
 
-# ---------------------------------------------------------
-# /XO
-# ---------------------------------------------------------
+# =========================================================
+# XO COMMAND
+# =========================================================
 
 @app.on_message(
-    filters.group & filters.command("xo", prefixes="/")
+    filters.group
+    & filters.command("xo", prefixes="/")
 )
 async def xo_start(client, message):
 
     chat_id = message.chat.id
 
-    if chat_id in games:
+    if chat_id in xo_games:
 
         await message.reply_text(
-            "🎮 **XO GAME ALREADY RUNNING!**"
+            "🎮 **XO game already running!**"
         )
         return
 
@@ -1018,36 +1077,37 @@ async def xo_start(client, message):
     if not user:
         return
 
-    games[chat_id] = {
+    xo_games[chat_id] = {
         "board": [None] * 9,
         "x": user.id,
-        "x_name": user.first_name or "Player X",
+        "x_name": user.first_name or "X",
         "o": None,
         "o_name": None,
         "turn": "X"
     }
 
-    game = games[chat_id]
+    game = xo_games[chat_id]
 
     await message.reply_text(
-        game_header(game),
-        reply_markup=board_keyboard(game["board"])
+        xo_text(game),
+        reply_markup=xo_keyboard(
+            game["board"]
+        )
     )
 
 
-# ---------------------------------------------------------
+# =========================================================
 # XO MOVE
-# ---------------------------------------------------------
+# =========================================================
 
 @app.on_callback_query(
-    filters.regex(r"^XO:(\d)$")
+    filters.regex(r"^XO_MOVE_(\d)$")
 )
 async def xo_move(client, query):
 
     chat_id = query.message.chat.id
-    uid = query.from_user.id
 
-    game = games.get(chat_id)
+    game = xo_games.get(chat_id)
 
     if not game:
 
@@ -1056,6 +1116,8 @@ async def xo_move(client, query):
             show_alert=True
         )
         return
+
+    uid = query.from_user.id
 
     if uid == game["x"]:
 
@@ -1066,7 +1128,7 @@ async def xo_move(client, query):
         game["o"] = uid
         game["o_name"] = (
             query.from_user.first_name
-            or "Player O"
+            or "O"
         )
 
         player = "O"
@@ -1078,7 +1140,7 @@ async def xo_move(client, query):
     else:
 
         await query.answer(
-            "👥 Already 2 players joined.",
+            "👥 Game already has 2 players.",
             show_alert=True
         )
         return
@@ -1086,7 +1148,7 @@ async def xo_move(client, query):
     if game["turn"] != player:
 
         await query.answer(
-            "⏳ Abhi tumhari turn nahi hai.",
+            "⏳ Tumhari turn nahi hai.",
             show_alert=True
         )
         return
@@ -1095,48 +1157,47 @@ async def xo_move(client, query):
         query.matches[0].group(1)
     )
 
-    if game["board"][position] is not None:
+    if game["board"][position]:
 
         await query.answer(
-            "❌ Box already filled.",
+            "❌ Box already used.",
             show_alert=True
         )
         return
 
     game["board"][position] = player
 
-    result = check_winner(game["board"])
+    result = xo_winner(
+        game["board"]
+    )
 
     if result:
 
         if result == "X":
-
             result_text = (
-                f"🏆 ❌ **{game['x_name']} WINS!**"
+                f"🏆 ❌ {game['x_name']} WINS!"
             )
 
         elif result == "O":
-
             result_text = (
-                f"🏆 ⭕ **{game['o_name']} WINS!**"
+                f"🏆 ⭕ {game['o_name']} WINS!"
             )
 
         else:
-
-            result_text = "🤝 **GAME DRAW!**"
+            result_text = "🤝 GAME DRAW!"
 
         await query.message.edit_text(
-            "╭━━〔 🏆 𝐆𝐀𝐌𝐄 𝐎𝐕𝐄𝐑 〕━━╮\n"
+            "╭━━〔 🏆 GAME OVER 〕━━╮\n"
             "│\n"
             f"│ {result_text}\n"
             "│\n"
             "╰━━━━━━━━━━━━━━━━╯",
-            reply_markup=board_keyboard(
+            reply_markup=xo_keyboard(
                 game["board"]
             )
         )
 
-        games.pop(chat_id, None)
+        xo_games.pop(chat_id, None)
 
         await query.answer()
         return
@@ -1148,8 +1209,8 @@ async def xo_move(client, query):
     )
 
     await query.message.edit_text(
-        game_header(game),
-        reply_markup=board_keyboard(
+        xo_text(game),
+        reply_markup=xo_keyboard(
             game["board"]
         )
     )
@@ -1157,9 +1218,9 @@ async def xo_move(client, query):
     await query.answer()
 
 
-# ---------------------------------------------------------
-# NEW GAME
-# ---------------------------------------------------------
+# =========================================================
+# XO NEW
+# =========================================================
 
 @app.on_callback_query(
     filters.regex("^XO_NEW$")
@@ -1169,45 +1230,45 @@ async def xo_new(client, query):
     chat_id = query.message.chat.id
     uid = query.from_user.id
 
-    old = games.get(chat_id)
+    old = xo_games.get(chat_id)
 
     if old and uid != old["x"]:
 
         await query.answer(
-            "❌ Sirf game creator New Game kar sakta hai.",
+            "❌ Sirf creator new game kar sakta hai.",
             show_alert=True
         )
         return
 
-    games[chat_id] = {
+    xo_games[chat_id] = {
         "board": [None] * 9,
         "x": uid,
         "x_name": (
             query.from_user.first_name
-            or "Player X"
+            or "X"
         ),
         "o": None,
         "o_name": None,
         "turn": "X"
     }
 
-    game = games[chat_id]
+    game = xo_games[chat_id]
 
     await query.message.edit_text(
-        game_header(game),
-        reply_markup=board_keyboard(
+        xo_text(game),
+        reply_markup=xo_keyboard(
             game["board"]
         )
     )
 
     await query.answer(
-        "🔄 New Game Started!"
+        "🔄 New game!"
     )
 
 
-# ---------------------------------------------------------
-# CLOSE
-# ---------------------------------------------------------
+# =========================================================
+# XO CLOSE
+# =========================================================
 
 @app.on_callback_query(
     filters.regex("^XO_CLOSE$")
@@ -1215,118 +1276,36 @@ async def xo_new(client, query):
 async def xo_close(client, query):
 
     chat_id = query.message.chat.id
-    uid = query.from_user.id
 
-    game = games.get(chat_id)
+    game = xo_games.get(chat_id)
 
     if game:
 
-        if uid not in [
+        if query.from_user.id not in [
             game["x"],
             game["o"]
         ]:
 
             await query.answer(
-                "❌ Sirf players game close kar sakte hain.",
+                "❌ Tum player nahi ho.",
                 show_alert=True
             )
             return
 
-        games.pop(chat_id, None)
+        xo_games.pop(chat_id, None)
 
     await query.message.edit_text(
-        "╭━━〔 ✖️ 𝐗𝐎 𝐂𝐋𝐎𝐒𝐄𝐃 〕━━╮\n"
+        "╭━━〔 ✖️ XO CLOSED 〕━━╮\n"
         "│\n"
-        "│ 🎮 Game closed successfully.\n"
+        "│ Game successfully closed.\n"
         "│\n"
-        "│ New game: `/xo`\n"
+        "│ 🎮 New game: `/xo`\n"
         "│\n"
         "╰━━━━━━━━━━━━━━━━╯"
     )
 
     await query.answer(
-        "✖️ Game Closed!"
-    )
-
-
-# =========================================================
-# HELP
-# =========================================================
-
-@app.on_message(
-    filters.me & filters.command("help", prefixes="/")
-)
-async def help_command(client, message):
-
-    await message.edit_text(
-        "╭━━━〔 🤖 𝐀𝐑 𝐀𝐃𝐕𝐀𝐍𝐂𝐄𝐃 〕━━━╮\n"
-        "│\n"
-        "│ 📩 𝐀𝐔𝐓𝐎 𝐑𝐄𝐏𝐋𝐘\n"
-        "│ /on /off /status\n"
-        "│ /setreply TEXT\n"
-        "│ /resetuser ID\n"
-        "│ /listusers\n"
-        "│ /clearusers\n"
-        "│\n"
-        "│ 👋 𝐖𝐄𝐋𝐂𝐎𝐌𝐄\n"
-        "│ /welcome TEXT\n"
-        "│\n"
-        "│ 💤 𝐀𝐅𝐊\n"
-        "│ /afk REASON\n"
-        "│\n"
-        "│ 📝 𝐍𝐎𝐓𝐄𝐒\n"
-        "│ /note NAME TEXT\n"
-        "│ /getnote NAME\n"
-        "│ /delnote NAME\n"
-        "│\n"
-        "│ 🛡️ 𝐌𝐀𝐍𝐀𝐆𝐄𝐑\n"
-        "│ /ban /kick /mute /unmute\n"
-        "│ /pin /del\n"
-        "│ /promote /demote\n"
-        "│\n"
-        "│ 🎮 𝐆𝐀𝐌𝐄\n"
-        "│ /xo\n"
-        "│\n"
-        "│ 🆔 /id\n"
-        "│\n"
-        "╰━━━━━━━━━━━━━━━━━━━━╯"
-    )
-
-
-# =========================================================
-# STATUS
-# =========================================================
-
-@app.on_message(
-    filters.me & filters.command("status", prefixes="/")
-)
-async def status_command(client, message):
-
-    auto = (
-        "🟢 ON"
-        if get_setting("auto_reply", "1") == "1"
-        else "🔴 OFF"
-    )
-
-    cur.execute(
-        "SELECT COUNT(*) FROM first_users"
-    )
-    users = cur.fetchone()[0]
-
-    cur.execute(
-        "SELECT COUNT(*) FROM notes"
-    )
-    notes = cur.fetchone()[0]
-
-    await message.edit_text(
-        "╭━━〔 📊 𝐀𝐑 𝐒𝐓𝐀𝐓𝐔𝐒 〕━━╮\n"
-        "│\n"
-        f"│ 📩 Auto Reply: {auto}\n"
-        f"│ 👥 First Contacts: {users}\n"
-        f"│ 📝 Notes: {notes}\n"
-        f"│ 🎮 Active Games: {len(games)}\n"
-        "│\n"
-        "╰━━━━━━━━━━━━━━━━╯"
+        "Game closed."
     )
 
 
@@ -1334,16 +1313,16 @@ async def status_command(client, message):
 # START
 # =========================================================
 
-print("========================================")
-print("🤖 AR ADVANCED MANAGER")
+print("")
+print("================================")
+print("🤖 AR MANAGER STARTED")
+print("================================")
 print("📩 First DM Auto Reply : ON")
 print("👋 Welcome             : ON")
 print("💤 AFK                 : ON")
 print("📝 Notes               : ON")
 print("🛡️ Group Manager       : ON")
 print("🎮 XO                  : ON")
-print("💾 SQLite              : ON")
-print("🚀 Railway Ready")
-print("========================================")
+print("================================")
 
 app.run()
