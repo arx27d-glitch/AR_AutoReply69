@@ -1,6 +1,8 @@
 import os
+import time
 import sqlite3
 import asyncio
+from collections import defaultdict
 
 from pyrogram import Client, filters, enums
 from pyrogram.types import (
@@ -10,9 +12,8 @@ from pyrogram.types import (
 )
 
 # ============================================================
-# ☠︎︎𝙰𝚁_乂 𝙼𝙰𝙽𝙰𝙶𝙴𝚁
-# SESSION STRING USERBOT
-# Railway Ready
+# ☠︎︎𝙰𝚁_乂 MANAGER
+# Telegram Userbot | Session String | Railway
 # ============================================================
 
 API_ID = int(os.environ["API_ID"])
@@ -28,38 +29,44 @@ os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
 # DATABASE
 # ============================================================
 
-db = sqlite3.connect(DB_PATH, check_same_thread=False)
+db = sqlite3.connect(
+    DB_PATH,
+    check_same_thread=False
+)
+
 db.row_factory = sqlite3.Row
 
 db.execute("""
-CREATE TABLE IF NOT EXISTS settings (
+CREATE TABLE IF NOT EXISTS chats (
     chat_id INTEGER PRIMARY KEY,
-    autoreply INTEGER DEFAULT 1,
     welcome INTEGER DEFAULT 1,
-    welcome_text TEXT DEFAULT NULL,
-    welcome_gif TEXT DEFAULT NULL
+    welcome_text TEXT,
+    welcome_gif TEXT,
+    autoreply INTEGER DEFAULT 1
 )
 """)
 
 db.execute("""
 CREATE TABLE IF NOT EXISTS replies (
-    chat_id INTEGER,
-    keyword TEXT,
-    response TEXT,
+    chat_id INTEGER NOT NULL,
+    keyword TEXT NOT NULL,
+    response TEXT NOT NULL,
     UNIQUE(chat_id, keyword)
 )
 """)
 
 db.execute("""
 CREATE TABLE IF NOT EXISTS warnings (
-    chat_id INTEGER,
-    user_id INTEGER,
+    chat_id INTEGER NOT NULL,
+    user_id INTEGER NOT NULL,
     warns INTEGER DEFAULT 0,
     PRIMARY KEY(chat_id, user_id)
 )
 """)
 
 db.commit()
+
+db_lock = asyncio.Lock()
 
 # ============================================================
 # CLIENT
@@ -69,14 +76,17 @@ app = Client(
     "AR_MANAGER",
     api_id=API_ID,
     api_hash=API_HASH,
-    session_string=SESSION_STRING
+    session_string=SESSION_STRING,
+    workers=16
 )
 
+START_TIME = time.time()
+
 # ============================================================
-# DEFAULT WELCOME
+# DEFAULT TEXT
 # ============================================================
 
-DEFAULT_WELCOME = """☠︎︎𝙰𝚁_乂 𝙼𝙰𝙽𝙰𝙶𝙴𝚁
+DEFAULT_WELCOME = """☠︎︎𝙰𝚁_乂 𝙈𝘼𝙉𝘼𝙂𝙀𝙍
 
 ╭━━━━━━━━━━━━━━━━━━╮
 ┃ 👋 𝙒𝙀𝙇𝘾𝙊𝙈𝙀
@@ -92,23 +102,34 @@ DEFAULT_WELCOME = """☠︎︎𝙰𝚁_乂 𝙼𝙰𝙽𝙰𝙶𝙴𝚁
 # HELPERS
 # ============================================================
 
-def ensure_settings(chat_id):
+def ensure_chat(chat_id):
     db.execute(
-        "INSERT OR IGNORE INTO settings(chat_id) VALUES(?)",
+        "INSERT OR IGNORE INTO chats(chat_id) VALUES(?)",
         (chat_id,)
     )
     db.commit()
 
 
-def get_settings(chat_id):
-    ensure_settings(chat_id)
-
-    row = db.execute(
-        "SELECT * FROM settings WHERE chat_id=?",
+def get_chat(chat_id):
+    ensure_chat(chat_id)
+    return db.execute(
+        "SELECT * FROM chats WHERE chat_id=?",
         (chat_id,)
     ).fetchone()
 
-    return row
+
+def uptime():
+    seconds = int(time.time() - START_TIME)
+
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes, seconds = divmod(seconds, 60)
+
+    return (
+        f"{days}d {hours}h {minutes}m {seconds}s"
+        if days else
+        f"{hours}h {minutes}m {seconds}s"
+    )
 
 
 async def is_admin(chat_id, user_id):
@@ -116,7 +137,10 @@ async def is_admin(chat_id, user_id):
         return True
 
     try:
-        member = await app.get_chat_member(chat_id, user_id)
+        member = await app.get_chat_member(
+            chat_id,
+            user_id
+        )
 
         return member.status in (
             enums.ChatMemberStatus.OWNER,
@@ -129,7 +153,10 @@ async def is_admin(chat_id, user_id):
 
 async def is_protected(chat_id, user_id):
     try:
-        member = await app.get_chat_member(chat_id, user_id)
+        member = await app.get_chat_member(
+            chat_id,
+            user_id
+        )
 
         return member.status in (
             enums.ChatMemberStatus.OWNER,
@@ -140,230 +167,208 @@ async def is_protected(chat_id, user_id):
         return False
 
 
-async def get_target(message):
+async def target_user(message):
     if message.reply_to_message:
         return message.reply_to_message.from_user
 
-    if len(message.command) > 1:
+    if len(message.command) >= 2:
         try:
-            return await app.get_users(message.command[1])
+            return await app.get_users(
+                message.command[1]
+            )
         except Exception:
             return None
 
     return None
 
 
-def format_welcome(text, user, chat):
-    name = user.first_name or "Friend"
-
-    username = (
-        f"@{user.username}"
-        if user.username
-        else name
-    )
-
+def welcome_format(text, user, chat):
     return (
         text
-        .replace("{name}", name)
-        .replace("{username}", username)
-        .replace("{id}", str(user.id))
-        .replace("{chat}", chat.title or "Group")
+        .replace(
+            "{name}",
+            user.first_name or "Friend"
+        )
+        .replace(
+            "{username}",
+            f"@{user.username}"
+            if user.username else "No Username"
+        )
+        .replace(
+            "{id}",
+            str(user.id)
+        )
+        .replace(
+            "{chat}",
+            chat.title or "Group"
+        )
+    )
+
+
+async def require_admin(message):
+    if not message.from_user:
+        return False
+
+    if not await is_admin(
+        message.chat.id,
+        message.from_user.id
+    ):
+        return False
+
+    return True
+
+
+# ============================================================
+# HELP
+# ============================================================
+
+HELP_TEXT = """☠︎︎𝙰𝚁_乂 **𝙈𝘼𝙉𝘼𝙂𝙀𝙍**
+
+╭━━━〔 ⚡ BASIC 〕━━━╮
+┃ `/ping`
+┃ `/alive`
+┃ `/id`
+┃ `/info`
+┃ `/stats`
+╰━━━━━━━━━━━━━━━━━━╯
+
+╭━━━〔 🛡️ MODERATION 〕━━━╮
+┃ `/ban`
+┃ `/unban`
+┃ `/kick`
+┃ `/mute`
+┃ `/unmute`
+┃ `/warn`
+┃ `/unwarn`
+╰━━━━━━━━━━━━━━━━━━━━━━╯
+
+╭━━━〔 🧹 MESSAGE 〕━━━╮
+┃ `/del`
+┃ `/purge 10`
+┃ `/pin`
+┃ `/unpin`
+╰━━━━━━━━━━━━━━━━━━╯
+
+╭━━━〔 👋 WELCOME 〕━━━╮
+┃ `/welcome on`
+┃ `/welcome off`
+┃ `/setwelcome TEXT`
+┃ `/getwelcome`
+┃ `/delwelcome`
+┃ `/setgif`
+┃ `/delgif`
+╰━━━━━━━━━━━━━━━━━━╯
+
+╭━━━〔 🤖 AUTOREPLY 〕━━━╮
+┃ `/autoreply on`
+┃ `/autoreply off`
+┃ `/setreply hi | Hello 👋`
+┃ `/delreply hi`
+┃ `/replies`
+╰━━━━━━━━━━━━━━━━━━━━━━╯
+"""
+
+# ============================================================
+# /HELP
+# ============================================================
+
+@app.on_message(filters.command("help"))
+async def help_cmd(_, message):
+    await message.reply_text(
+        HELP_TEXT,
+        disable_web_page_preview=True
     )
 
 
 # ============================================================
-# START
+# /PING
 # ============================================================
 
-@app.on_message(filters.command("start") & filters.private)
-async def start_handler(_, message):
+@app.on_message(filters.command("ping"))
+async def ping_cmd(_, message):
+
+    start = time.perf_counter()
+
+    msg = await message.reply_text(
+        "☠︎︎𝙰𝚁_乂 **𝙋𝙄𝙉𝙂𝙄𝙉𝙂...**"
+    )
+
+    ms = (time.perf_counter() - start) * 1000
+
+    await msg.edit_text(
+        "☠︎︎𝙰𝚁_乂 **𝙋𝙊𝙉𝙂! ⚡**\n\n"
+        f"⚡ Response: `{ms:.0f} ms`\n"
+        f"🟢 Status: `ONLINE`"
+    )
+
+
+# ============================================================
+# /ALIVE
+# ============================================================
+
+@app.on_message(filters.command("alive"))
+async def alive_cmd(_, message):
 
     me = await app.get_me()
 
-    buttons = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton(
-                "📚 𝙃𝙀𝙇𝙋",
-                callback_data="ar_help"
-            ),
-            InlineKeyboardButton(
-                "⚙️ 𝘾𝙈𝘿𝙎",
-                callback_data="ar_commands"
-            )
-        ]
-    ])
-
     await message.reply_text(
-        "☠︎︎𝙰𝚁_乂 **𝙼𝙰𝙽𝙰𝙶𝙴𝚁**\n\n"
-        "╭━━━━━━━━━━━━━━━━━━╮\n"
-        "┃ 🤖 𝘼𝙪𝙩𝙤 𝙍𝙚𝙥𝙡𝙮\n"
-        "┃ 🛡️ 𝙂𝙧𝙤𝙪𝙥 𝙈𝙖𝙣𝙖𝙜𝙚𝙧\n"
-        "┃ 🔨 𝘽𝙖𝙣 • 𝙈𝙪𝙩𝙚\n"
-        "┃ ⚠️ 𝙒𝙖𝙧𝙣 𝙎𝙮𝙨𝙩𝙚𝙢\n"
-        "┃ 👋 𝙒𝙚𝙡𝙘𝙤𝙢𝙚 𝙂𝙄𝙁\n"
-        "╰━━━━━━━━━━━━━━━━━━╯\n\n"
-        f"👤 **Account:** @{me.username or 'NoUsername'}\n"
-        "🟢 **𝙎𝙔𝙎𝙏𝙀𝙈 𝙊𝙉𝙇𝙄𝙉𝙀**",
-        reply_markup=buttons
+        "☠︎︎𝙰𝚁_乂 **𝙎𝙔𝙎𝙏𝙀𝙈 𝘼𝙇𝙄𝙑𝙀**\n\n"
+        f"👤 Account: `{me.first_name}`\n"
+        f"🆔 ID: `{me.id}`\n"
+        f"⏱ Uptime: `{uptime()}`\n"
+        "🟢 Status: `ONLINE`"
     )
 
 
 # ============================================================
-# CALLBACK HELP
-# ============================================================
-
-@app.on_callback_query(filters.regex("^ar_help$"))
-async def help_callback(_, query):
-
-    await query.answer()
-
-    await query.message.edit_text(
-        "☠︎︎𝙰𝚁_乂 **𝙼𝙰𝙽𝙰𝙶𝙴𝚁**\n\n"
-
-        "🛡️ **𝙈𝙊𝘿𝙀𝙍𝘼𝙏𝙄𝙊𝙉**\n"
-        "`/ban` • `/unban`\n"
-        "`/mute` • `/unmute`\n"
-        "`/warn` • `/unwarn`\n\n"
-
-        "🧹 **𝙈𝙀𝙎𝙎𝘼𝙂𝙀**\n"
-        "`/del` • `/pin` • `/unpin`\n\n"
-
-        "👤 **𝙐𝙎𝙀𝙍**\n"
-        "`/id` • `/info`\n\n"
-
-        "🤖 **𝘼𝙐𝙏𝙊𝙍𝙀𝙋𝙇𝙔**\n"
-        "`/autoreply on`\n"
-        "`/autoreply off`\n"
-        "`/setreply hello | Hello 👋`\n"
-        "`/delreply hello`\n\n"
-
-        "👋 **𝙒𝙀𝙇𝘾𝙊𝙈𝙀**\n"
-        "`/setgif` — Reply to GIF\n"
-        "`/delgif`\n"
-        "`/setwelcome message`\n"
-        "`/delwelcome`\n"
-        "`/welcome on`\n"
-        "`/welcome off`\n"
-        "`/getwelcome`",
-
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "🔙 𝘽𝘼𝘾𝙆",
-                    callback_data="ar_back"
-                )
-            ]
-        ])
-    )
-
-
-@app.on_callback_query(filters.regex("^ar_commands$"))
-async def commands_callback(_, query):
-
-    await query.answer()
-
-    await query.message.edit_text(
-        "☠︎︎𝙰𝚁_乂 **𝙌𝙐𝙄𝘾𝙆 𝘾𝙈𝘿𝙎**\n\n"
-
-        "🔨 `/ban @user`\n"
-        "🔇 `/mute @user`\n"
-        "🔊 `/unmute @user`\n"
-        "⚠️ `/warn @user`\n"
-        "📢 `/unwarn @user`\n"
-        "🧹 `/del` *(reply)*\n"
-        "📌 `/pin` *(reply)*\n"
-        "📌 `/unpin`\n"
-        "🆔 `/id`\n"
-        "ℹ️ `/info @user`\n\n"
-
-        "👋 **WELCOME**\n"
-        "Reply GIF → `/setgif`\n"
-        "`/setwelcome Hey {name}!`\n"
-        "`/welcome on`\n"
-        "`/welcome off`",
-
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "🔙 𝘽𝘼𝘾𝙆",
-                    callback_data="ar_back"
-                )
-            ]
-        ])
-    )
-
-
-@app.on_callback_query(filters.regex("^ar_back$"))
-async def back_callback(_, query):
-
-    await query.answer()
-
-    await query.message.edit_text(
-        "☠︎︎𝙰𝚁_乂 **𝙼𝙰𝙽𝙰𝙶𝙀𝚁**\n\n"
-        "🟢 **𝙎𝙔𝙎𝙏𝙀𝙈 𝙊𝙉𝙇𝙄𝙉𝙀**",
-
-        reply_markup=InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton(
-                    "📚 𝙃𝙀𝙇𝙋",
-                    callback_data="ar_help"
-                ),
-                InlineKeyboardButton(
-                    "⚙️ 𝘾𝙈𝘿𝙎",
-                    callback_data="ar_commands"
-                )
-            ]
-        ])
-    )
-
-
-# ============================================================
-# ID
+# /ID
 # ============================================================
 
 @app.on_message(filters.command("id"))
-async def id_handler(_, message):
+async def id_cmd(_, message):
 
     if message.reply_to_message:
         user = message.reply_to_message.from_user
 
         await message.reply_text(
             "☠︎︎𝙰𝚁_乂 **𝙄𝘿 𝙄𝙉𝙁𝙊**\n\n"
-            f"👤 Name: {user.mention}\n"
+            f"👤 User: {user.mention}\n"
             f"🆔 User ID: `{user.id}`\n"
             f"💬 Chat ID: `{message.chat.id}`"
         )
-    else:
-        await message.reply_text(
-            f"☠︎︎𝙰𝚁_乂\n\n"
-            f"💬 **Chat ID:** `{message.chat.id}`"
-        )
+        return
+
+    await message.reply_text(
+        "☠︎︎𝙰𝚁_乂 **𝙄𝘿**\n\n"
+        f"💬 Chat ID: `{message.chat.id}`\n"
+        f"👤 Your ID: `{message.from_user.id}`"
+    )
 
 
 # ============================================================
-# INFO
+# /INFO
 # ============================================================
 
 @app.on_message(filters.command("info"))
-async def info_handler(_, message):
+async def info_cmd(_, message):
 
-    user = await get_target(message)
+    user = await target_user(message)
 
     if not user:
         await message.reply_text(
-            "❌ Reply to a user or use `/info @username`"
+            "❌ Reply to a user or use:\n"
+            "`/info @username`"
         )
         return
 
     username = (
         f"@{user.username}"
-        if user.username
-        else "None"
+        if user.username else "None"
     )
 
     await message.reply_text(
         "☠︎︎𝙰𝚁_乂 **𝙐𝙎𝙀𝙍 𝙄𝙉𝙁𝙊**\n\n"
-        f"👤 Name: {user.first_name or 'Unknown'}\n"
+        f"👤 Name: `{user.first_name or 'Unknown'}`\n"
         f"🆔 ID: `{user.id}`\n"
         f"🔗 Username: `{username}`\n"
         f"🤖 Bot: `{user.is_bot}`"
@@ -371,29 +376,68 @@ async def info_handler(_, message):
 
 
 # ============================================================
+# /STATS
+# ============================================================
+
+@app.on_message(filters.command("stats"))
+async def stats_cmd(_, message):
+
+    try:
+        dialogs = 0
+        groups = 0
+        private = 0
+
+        async for dialog in app.get_dialogs():
+
+            dialogs += 1
+
+            if dialog.chat.type in (
+                enums.ChatType.GROUP,
+                enums.ChatType.SUPERGROUP
+            ):
+                groups += 1
+
+            elif dialog.chat.type == enums.ChatType.PRIVATE:
+                private += 1
+
+        await message.reply_text(
+            "☠︎︎𝙰𝚁_乂 **𝙎𝙏𝘼𝙏𝙎**\n\n"
+            f"💬 Dialogs: `{dialogs}`\n"
+            f"👥 Groups: `{groups}`\n"
+            f"👤 Private: `{private}`\n"
+            f"⏱ Uptime: `{uptime()}`"
+        )
+
+    except Exception as e:
+        await message.reply_text(
+            f"❌ Stats error:\n`{e}`"
+        )
+
+
+# ============================================================
 # BAN
 # ============================================================
 
 @app.on_message(filters.command("ban") & filters.group)
-async def ban_handler(_, message):
+async def ban_cmd(_, message):
 
-    if not message.from_user:
+    if not await require_admin(message):
         return
 
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return
-
-    user = await get_target(message)
+    user = await target_user(message)
 
     if not user:
         await message.reply_text(
-            "❌ Reply to a user or use `/ban @username`"
+            "❌ Reply to a user or `/ban @username`"
         )
         return
 
-    if await is_protected(message.chat.id, user.id):
+    if await is_protected(
+        message.chat.id,
+        user.id
+    ):
         await message.reply_text(
-            "❌ **Admin ko ban nahi kar sakta.**"
+            "❌ Admin ko ban nahi kar sakta."
         )
         return
 
@@ -420,19 +464,16 @@ async def ban_handler(_, message):
 # ============================================================
 
 @app.on_message(filters.command("unban") & filters.group)
-async def unban_handler(_, message):
+async def unban_cmd(_, message):
 
-    if not message.from_user:
+    if not await require_admin(message):
         return
 
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return
-
-    user = await get_target(message)
+    user = await target_user(message)
 
     if not user:
         await message.reply_text(
-            "❌ Reply to a user or use `/unban @username`"
+            "❌ Reply to a user or `/unban @username`"
         )
         return
 
@@ -454,29 +495,78 @@ async def unban_handler(_, message):
 
 
 # ============================================================
+# KICK
+# ============================================================
+
+@app.on_message(filters.command("kick") & filters.group)
+async def kick_cmd(_, message):
+
+    if not await require_admin(message):
+        return
+
+    user = await target_user(message)
+
+    if not user:
+        await message.reply_text(
+            "❌ Reply to a user or `/kick @username`"
+        )
+        return
+
+    if await is_protected(
+        message.chat.id,
+        user.id
+    ):
+        await message.reply_text(
+            "❌ Admin ko kick nahi kar sakta."
+        )
+        return
+
+    try:
+        await app.ban_chat_member(
+            message.chat.id,
+            user.id
+        )
+
+        await app.unban_chat_member(
+            message.chat.id,
+            user.id
+        )
+
+        await message.reply_text(
+            f"👢 ☠︎︎𝙰𝚁_乂 **𝙆𝙄𝘾𝙆𝙀𝘿**\n\n"
+            f"👤 {user.mention}"
+        )
+
+    except Exception as e:
+        await message.reply_text(
+            f"❌ Kick failed:\n`{e}`"
+        )
+
+
+# ============================================================
 # MUTE
 # ============================================================
 
 @app.on_message(filters.command("mute") & filters.group)
-async def mute_handler(_, message):
+async def mute_cmd(_, message):
 
-    if not message.from_user:
+    if not await require_admin(message):
         return
 
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return
-
-    user = await get_target(message)
+    user = await target_user(message)
 
     if not user:
         await message.reply_text(
-            "❌ Reply to a user or use `/mute @username`"
+            "❌ Reply to a user or `/mute @username`"
         )
         return
 
-    if await is_protected(message.chat.id, user.id):
+    if await is_protected(
+        message.chat.id,
+        user.id
+    ):
         await message.reply_text(
-            "❌ **Admin ko mute nahi kar sakta.**"
+            "❌ Admin ko mute nahi kar sakta."
         )
         return
 
@@ -490,9 +580,8 @@ async def mute_handler(_, message):
         )
 
         await message.reply_text(
-            f"☠︎︎𝙰𝚁_乂 **𝙈𝙐𝙏𝙀𝘿**\n\n"
-            f"👤 {user.mention}\n"
-            f"🆔 `{user.id}`"
+            f"🔇 ☠︎︎𝙰𝚁_乂 **𝙈𝙐𝙏𝙀𝘿**\n\n"
+            f"👤 {user.mention}"
         )
 
     except Exception as e:
@@ -506,19 +595,16 @@ async def mute_handler(_, message):
 # ============================================================
 
 @app.on_message(filters.command("unmute") & filters.group)
-async def unmute_handler(_, message):
+async def unmute_cmd(_, message):
 
-    if not message.from_user:
+    if not await require_admin(message):
         return
 
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return
-
-    user = await get_target(message)
+    user = await target_user(message)
 
     if not user:
         await message.reply_text(
-            "❌ Reply to a user or use `/unmute @username`"
+            "❌ Reply to a user or `/unmute @username`"
         )
         return
 
@@ -535,7 +621,7 @@ async def unmute_handler(_, message):
         )
 
         await message.reply_text(
-            f"☠︎︎𝙰𝚁_乂 **𝙐𝙉𝙈𝙐𝙏𝙀𝘿**\n\n"
+            f"🔊 ☠︎︎𝙰𝚁_乂 **𝙐𝙉𝙈𝙐𝙏𝙀𝘿**\n\n"
             f"👤 {user.mention}"
         )
 
@@ -550,25 +636,25 @@ async def unmute_handler(_, message):
 # ============================================================
 
 @app.on_message(filters.command("warn") & filters.group)
-async def warn_handler(_, message):
+async def warn_cmd(_, message):
 
-    if not message.from_user:
+    if not await require_admin(message):
         return
 
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return
-
-    user = await get_target(message)
+    user = await target_user(message)
 
     if not user:
         await message.reply_text(
-            "❌ Reply to a user or use `/warn @username`"
+            "❌ Reply to a user or `/warn @username`"
         )
         return
 
-    if await is_protected(message.chat.id, user.id):
+    if await is_protected(
+        message.chat.id,
+        user.id
+    ):
         await message.reply_text(
-            "❌ **Admin ko warn nahi kar sakta.**"
+            "❌ Admin ko warn nahi kar sakta."
         )
         return
 
@@ -606,6 +692,7 @@ async def warn_handler(_, message):
                 "WHERE chat_id=? AND user_id=?",
                 (message.chat.id, user.id)
             )
+
             db.commit()
 
             await message.reply_text(
@@ -622,9 +709,9 @@ async def warn_handler(_, message):
     else:
 
         await message.reply_text(
-            f"⚠️ ☠︎︎𝙰𝚁_乂 **𝙒𝘼𝙍𝙉𝙄𝙉𝙂**\n\n"
+            f"⚠️ ☠︎︎𝙰𝚁_乂 **𝙒𝘼𝙍𝙉**\n\n"
             f"👤 {user.mention}\n"
-            f"📊 **Warning:** `{warns}/3`"
+            f"📊 `{warns}/3`"
         )
 
 
@@ -633,15 +720,12 @@ async def warn_handler(_, message):
 # ============================================================
 
 @app.on_message(filters.command("unwarn") & filters.group)
-async def unwarn_handler(_, message):
+async def unwarn_cmd(_, message):
 
-    if not message.from_user:
+    if not await require_admin(message):
         return
 
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return
-
-    user = await get_target(message)
+    user = await target_user(message)
 
     if not user:
         await message.reply_text(
@@ -661,25 +745,35 @@ async def unwarn_handler(_, message):
         )
         return
 
-    warns = max(0, row["warns"] - 1)
+    warns = max(
+        0,
+        row["warns"] - 1
+    )
 
-    if warns == 0:
-        db.execute(
-            "DELETE FROM warnings "
-            "WHERE chat_id=? AND user_id=?",
-            (message.chat.id, user.id)
-        )
-    else:
+    if warns:
         db.execute(
             "UPDATE warnings SET warns=? "
             "WHERE chat_id=? AND user_id=?",
-            (warns, message.chat.id, user.id)
+            (
+                warns,
+                message.chat.id,
+                user.id
+            )
+        )
+    else:
+        db.execute(
+            "DELETE FROM warnings "
+            "WHERE chat_id=? AND user_id=?",
+            (
+                message.chat.id,
+                user.id
+            )
         )
 
     db.commit()
 
     await message.reply_text(
-        f"✅ ☠︎︎𝙰𝚁_乂 **𝙒𝘼𝙍𝙉 𝙍𝙀𝙈𝙊𝙑𝙀𝘿**\n\n"
+        f"✅ **Warning removed**\n"
         f"👤 {user.mention}\n"
         f"📊 `{warns}/3`"
     )
@@ -690,17 +784,14 @@ async def unwarn_handler(_, message):
 # ============================================================
 
 @app.on_message(filters.command("del") & filters.group)
-async def delete_handler(_, message):
+async def del_cmd(_, message):
 
-    if not message.from_user:
-        return
-
-    if not await is_admin(message.chat.id, message.from_user.id):
+    if not await require_admin(message):
         return
 
     if not message.reply_to_message:
         await message.reply_text(
-            "❌ **Reply to a message.**"
+            "❌ Reply to a message."
         )
         return
 
@@ -712,21 +803,68 @@ async def delete_handler(_, message):
 
 
 # ============================================================
-# PIN
+# PURGE
 # ============================================================
 
-@app.on_message(filters.command("pin") & filters.group)
-async def pin_handler(_, message):
+@app.on_message(filters.command("purge") & filters.group)
+async def purge_cmd(_, message):
 
-    if not message.from_user:
-        return
-
-    if not await is_admin(message.chat.id, message.from_user.id):
+    if not await require_admin(message):
         return
 
     if not message.reply_to_message:
         await message.reply_text(
-            "❌ **Reply to the message you want to pin.**"
+            "❌ Reply to the first message."
+        )
+        return
+
+    try:
+        amount = 10
+
+        if len(message.command) >= 2:
+            try:
+                amount = min(
+                    int(message.command[1]),
+                    100
+                )
+            except ValueError:
+                pass
+
+        messages = []
+
+        async for msg in app.get_chat_history(
+            message.chat.id,
+            limit=amount + 1,
+            offset_id=message.reply_to_message.id
+        ):
+            if msg.id >= message.reply_to_message.id:
+                messages.append(msg.id)
+
+        if messages:
+            await app.delete_messages(
+                message.chat.id,
+                messages
+            )
+
+    except Exception as e:
+        await message.reply_text(
+            f"❌ Purge failed:\n`{e}`"
+        )
+
+
+# ============================================================
+# PIN
+# ============================================================
+
+@app.on_message(filters.command("pin") & filters.group)
+async def pin_cmd(_, message):
+
+    if not await require_admin(message):
+        return
+
+    if not message.reply_to_message:
+        await message.reply_text(
+            "❌ Reply to a message."
         )
         return
 
@@ -734,7 +872,7 @@ async def pin_handler(_, message):
         await message.reply_to_message.pin()
 
         await message.reply_text(
-            "📌 ☠︎︎𝙰𝚁_乂 **𝙈𝙀𝙎𝙎𝘼𝙂𝙀 𝙋𝙄𝙉𝙉𝙀𝘿**"
+            "📌 ☠︎︎𝙰𝚁_乂 **𝙋𝙄𝙉𝙉𝙀𝘿**"
         )
 
     except Exception as e:
@@ -748,19 +886,18 @@ async def pin_handler(_, message):
 # ============================================================
 
 @app.on_message(filters.command("unpin") & filters.group)
-async def unpin_handler(_, message):
+async def unpin_cmd(_, message):
 
-    if not message.from_user:
-        return
-
-    if not await is_admin(message.chat.id, message.from_user.id):
+    if not await require_admin(message):
         return
 
     try:
-        await app.unpin_chat_message(message.chat.id)
+        await app.unpin_chat_message(
+            message.chat.id
+        )
 
         await message.reply_text(
-            "📌 ☠︎︎𝙰𝚁_乂 **𝙈𝙀𝙎𝙎𝘼𝙂𝙀 𝙐𝙉𝙋𝙄𝙉𝙉𝙀𝘿**"
+            "📌 ☠︎︎𝙰𝚁_乂 **𝙐𝙉𝙋𝙄𝙉𝙉𝙀𝘿**"
         )
 
     except Exception as e:
@@ -770,29 +907,33 @@ async def unpin_handler(_, message):
 
 
 # ============================================================
-# AUTOREPLY ON/OFF
+# WELCOME ON/OFF
 # ============================================================
 
-@app.on_message(filters.command("autoreply") & filters.group)
-async def autoreply_handler(_, message):
+@app.on_message(filters.command("welcome"))
+async def welcome_cmd(_, message):
 
-    if not message.from_user:
+    if message.chat.type not in (
+        enums.ChatType.GROUP,
+        enums.ChatType.SUPERGROUP
+    ):
+        await message.reply_text(
+            "❌ Welcome system groups ke liye hai."
+        )
         return
 
-    if not await is_admin(message.chat.id, message.from_user.id):
+    if not await require_admin(message):
         return
 
-    ensure_settings(message.chat.id)
+    ensure_chat(message.chat.id)
 
     if len(message.command) < 2:
-
-        row = get_settings(message.chat.id)
+        row = get_chat(message.chat.id)
 
         await message.reply_text(
-            "🤖 ☠︎︎𝙰𝚁_乂 **𝘼𝙐𝙏𝙊𝙍𝙀𝙋𝙇𝙔**\n\n"
-            f"Status: **{'ON 🟢' if row['autoreply'] else 'OFF 🔴'}**\n\n"
-            "`/autoreply on`\n"
-            "`/autoreply off`"
+            "👋 **WELCOME STATUS**\n\n"
+            f"Status: "
+            f"**{'ON 🟢' if row['welcome'] else 'OFF 🔴'}**"
         )
         return
 
@@ -800,16 +941,271 @@ async def autoreply_handler(_, message):
 
     if value not in ("on", "off"):
         await message.reply_text(
-            "❌ `/autoreply on` या `/autoreply off`"
+            "❌ `/welcome on` or `/welcome off`"
         )
         return
 
     state = 1 if value == "on" else 0
 
     db.execute(
-        "UPDATE settings SET autoreply=? WHERE chat_id=?",
+        "UPDATE chats SET welcome=? WHERE chat_id=?",
         (state, message.chat.id)
     )
+
+    db.commit()
+
+    await message.reply_text(
+        f"👋 **Welcome {'ON 🟢' if state else 'OFF 🔴'}**"
+    )
+
+
+# ============================================================
+# SET WELCOME
+# ============================================================
+
+@app.on_message(filters.command("setwelcome") & filters.group)
+async def setwelcome_cmd(_, message):
+
+    if not await require_admin(message):
+        return
+
+    if len(message.text.split(None, 1)) < 2:
+        await message.reply_text(
+            "❌ Example:\n\n"
+            "`/setwelcome Hey {name}! "
+            "Welcome to {chat} 👋`"
+        )
+        return
+
+    text = message.text.split(None, 1)[1]
+
+    if len(text) > 3000:
+        await message.reply_text(
+            "❌ Message too long."
+        )
+        return
+
+    ensure_chat(message.chat.id)
+
+    db.execute(
+        "UPDATE chats SET welcome_text=? "
+        "WHERE chat_id=?",
+        (text, message.chat.id)
+    )
+
+    db.commit()
+
+    await message.reply_text(
+        "✅ ☠︎︎𝙰𝚁_乂 **𝙒𝙀𝙇𝘾𝙊𝙈𝙀 𝙎𝘼𝙑𝙀𝘿!**\n\n"
+        "Available:\n"
+        "`{name}` `{username}` `{id}` `{chat}`"
+    )
+
+
+# ============================================================
+# GET WELCOME
+# ============================================================
+
+@app.on_message(filters.command("getwelcome") & filters.group)
+async def getwelcome_cmd(_, message):
+
+    if not await require_admin(message):
+        return
+
+    row = get_chat(message.chat.id)
+
+    text = row["welcome_text"] or DEFAULT_WELCOME
+
+    await message.reply_text(
+        "☠︎︎𝙰𝚁_乂 **𝙒𝙀𝙇𝘾𝙊𝙈𝙀**\n\n"
+        f"👋 Status: "
+        f"**{'ON 🟢' if row['welcome'] else 'OFF 🔴'}**\n"
+        f"🎞️ GIF: "
+        f"**{'SET 🟢' if row['welcome_gif'] else 'NOT SET 🔴'}**\n\n"
+        "📝 **Message:**\n"
+        f"{text}"
+    )
+
+
+# ============================================================
+# DELETE WELCOME
+# ============================================================
+
+@app.on_message(filters.command("delwelcome") & filters.group)
+async def delwelcome_cmd(_, message):
+
+    if not await require_admin(message):
+        return
+
+    db.execute(
+        "UPDATE chats SET welcome_text=NULL "
+        "WHERE chat_id=?",
+        (message.chat.id,)
+    )
+
+    db.commit()
+
+    await message.reply_text(
+        "🗑️ **Custom welcome removed.**"
+    )
+
+
+# ============================================================
+# SET GIF
+# ============================================================
+
+@app.on_message(filters.command("setgif") & filters.group)
+async def setgif_cmd(_, message):
+
+    if not await require_admin(message):
+        return
+
+    if not message.reply_to_message:
+        await message.reply_text(
+            "❌ Kisi GIF/animation ko reply karke `/setgif` bhejo."
+        )
+        return
+
+    msg = message.reply_to_message
+
+    file_id = None
+
+    if msg.animation:
+        file_id = msg.animation.file_id
+
+    elif msg.document:
+        mime = msg.document.mime_type or ""
+
+        if mime.startswith("video/"):
+            file_id = msg.document.file_id
+
+    if not file_id:
+        await message.reply_text(
+            "❌ Reply message mein GIF/animation nahi mila."
+        )
+        return
+
+    ensure_chat(message.chat.id)
+
+    db.execute(
+        "UPDATE chats SET welcome_gif=? "
+        "WHERE chat_id=?",
+        (file_id, message.chat.id)
+    )
+
+    db.commit()
+
+    await message.reply_text(
+        "✅ ☠︎︎𝙰𝚁_乂 **𝙒𝙀𝙇𝘾𝙊𝙈𝙀 𝙂𝙄𝙁 𝙎𝙀𝙏!** 🎞️"
+    )
+
+
+# ============================================================
+# DELETE GIF
+# ============================================================
+
+@app.on_message(filters.command("delgif") & filters.group)
+async def delgif_cmd(_, message):
+
+    if not await require_admin(message):
+        return
+
+    db.execute(
+        "UPDATE chats SET welcome_gif=NULL "
+        "WHERE chat_id=?",
+        (message.chat.id,)
+    )
+
+    db.commit()
+
+    await message.reply_text(
+        "🗑️ **Welcome GIF removed.**"
+    )
+
+
+# ============================================================
+# NEW MEMBER
+# ============================================================
+
+@app.on_message(filters.new_chat_members)
+async def new_member(_, message):
+
+    row = get_chat(message.chat.id)
+
+    if not row["welcome"]:
+        return
+
+    for user in message.new_chat_members:
+
+        if user.is_self:
+            continue
+
+        text = welcome_format(
+            row["welcome_text"] or DEFAULT_WELCOME,
+            user,
+            message.chat
+        )
+
+        try:
+
+            if row["welcome_gif"]:
+
+                await message.reply_animation(
+                    row["welcome_gif"],
+                    caption=text
+                )
+
+            else:
+
+                await message.reply_text(text)
+
+        except Exception:
+
+            try:
+                await message.reply_text(text)
+            except Exception:
+                pass
+
+
+# ============================================================
+# AUTOREPLY ON/OFF
+# ============================================================
+
+@app.on_message(filters.command("autoreply") & filters.group)
+async def autoreply_cmd(_, message):
+
+    if not await require_admin(message):
+        return
+
+    ensure_chat(message.chat.id)
+
+    if len(message.command) < 2:
+
+        row = get_chat(message.chat.id)
+
+        await message.reply_text(
+            "🤖 **AUTOREPLY**\n\n"
+            f"Status: "
+            f"**{'ON 🟢' if row['autoreply'] else 'OFF 🔴'}**"
+        )
+        return
+
+    value = message.command[1].lower()
+
+    if value not in ("on", "off"):
+        await message.reply_text(
+            "❌ `/autoreply on` or `/autoreply off`"
+        )
+        return
+
+    state = 1 if value == "on" else 0
+
+    db.execute(
+        "UPDATE chats SET autoreply=? "
+        "WHERE chat_id=?",
+        (state, message.chat.id)
+    )
+
     db.commit()
 
     await message.reply_text(
@@ -822,18 +1218,16 @@ async def autoreply_handler(_, message):
 # ============================================================
 
 @app.on_message(filters.command("setreply") & filters.group)
-async def setreply_handler(_, message):
+async def setreply_cmd(_, message):
 
-    if not message.from_user:
-        return
-
-    if not await is_admin(message.chat.id, message.from_user.id):
+    if not await require_admin(message):
         return
 
     if not message.text or "|" not in message.text:
+
         await message.reply_text(
             "❌ **Format:**\n\n"
-            "`/setreply hello | Hello bro 👋`"
+            "`/setreply hi | Hello 👋`"
         )
         return
 
@@ -846,7 +1240,7 @@ async def setreply_handler(_, message):
 
     if not keyword or not response:
         await message.reply_text(
-            "❌ Keyword और reply required है."
+            "❌ Keyword/reply missing."
         )
         return
 
@@ -864,9 +1258,9 @@ async def setreply_handler(_, message):
     db.commit()
 
     await message.reply_text(
-        "☠︎︎𝙰𝚁_乂 **𝘼𝙐𝙏𝙊𝙍𝙀𝙋𝙇𝙔 𝙎𝘼𝙑𝙀𝘿**\n\n"
-        f"🔑 Keyword: `{keyword}`\n"
-        f"💬 Reply: {response}"
+        "✅ ☠︎︎𝙰𝚁_乂 **𝙍𝙀𝙋𝙇𝙔 𝙎𝘼𝙑𝙀𝘿**\n\n"
+        f"🔑 `{keyword}`\n"
+        f"💬 {response}"
     )
 
 
@@ -875,359 +1269,117 @@ async def setreply_handler(_, message):
 # ============================================================
 
 @app.on_message(filters.command("delreply") & filters.group)
-async def delreply_handler(_, message):
+async def delreply_cmd(_, message):
 
-    if not message.from_user:
-        return
-
-    if not await is_admin(message.chat.id, message.from_user.id):
+    if not await require_admin(message):
         return
 
     if len(message.command) < 2:
         await message.reply_text(
-            "❌ Example: `/delreply hello`"
+            "❌ `/delreply keyword`"
         )
         return
 
     keyword = message.command[1].lower()
 
     db.execute(
-        "DELETE FROM replies WHERE chat_id=? AND keyword=?",
+        "DELETE FROM replies "
+        "WHERE chat_id=? AND keyword=?",
         (message.chat.id, keyword)
     )
 
     db.commit()
 
     await message.reply_text(
-        f"🗑️ **Reply Removed:** `{keyword}`"
+        f"🗑️ Reply removed: `{keyword}`"
     )
 
 
 # ============================================================
-# SET WELCOME GIF
+# LIST REPLIES
 # ============================================================
 
-@app.on_message(filters.command("setgif") & filters.group)
-async def setgif_handler(_, message):
+@app.on_message(filters.command("replies") & filters.group)
+async def replies_cmd(_, message):
 
-    if not message.from_user:
+    if not await require_admin(message):
         return
 
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return
-
-    if not message.reply_to_message:
-        await message.reply_text(
-            "❌ **Kisi GIF/Animation ko reply karke `/setgif` likho.**"
-        )
-        return
-
-    replied = message.reply_to_message
-
-    file_id = None
-
-    if replied.animation:
-        file_id = replied.animation.file_id
-
-    elif replied.document and replied.document.mime_type:
-        if replied.document.mime_type.startswith("video/"):
-            file_id = replied.document.file_id
-
-    if not file_id:
-        await message.reply_text(
-            "❌ **Sirf GIF/Animation ko reply karke `/setgif` use karo.**"
-        )
-        return
-
-    ensure_settings(message.chat.id)
-
-    db.execute(
-        "UPDATE settings SET welcome_gif=? WHERE chat_id=?",
-        (file_id, message.chat.id)
-    )
-    db.commit()
-
-    await message.reply_text(
-        "✅ ☠︎︎𝙰𝚁_乂 **𝙒𝙀𝙇𝘾𝙊𝙈𝙀 𝙂𝙄𝙁 𝙎𝘼𝙑𝙀𝘿!**\n\n"
-        "👋 Ab naye member ke welcome par ye GIF use hogi."
-    )
-
-
-# ============================================================
-# DELETE GIF
-# ============================================================
-
-@app.on_message(filters.command("delgif") & filters.group)
-async def delgif_handler(_, message):
-
-    if not message.from_user:
-        return
-
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return
-
-    ensure_settings(message.chat.id)
-
-    db.execute(
-        "UPDATE settings SET welcome_gif=NULL WHERE chat_id=?",
+    rows = db.execute(
+        "SELECT keyword FROM replies "
+        "WHERE chat_id=? ORDER BY keyword",
         (message.chat.id,)
-    )
-    db.commit()
+    ).fetchall()
 
-    await message.reply_text(
-        "🗑️ ☠︎︎𝙰𝚁_乂 **𝙒𝙀𝙇𝘾𝙊𝙈𝙀 𝙂𝙄𝙁 𝙍𝙀𝙈𝙊𝙑𝙀𝘿**"
-    )
-
-
-# ============================================================
-# SET WELCOME TEXT
-# ============================================================
-
-@app.on_message(filters.command("setwelcome") & filters.group)
-async def setwelcome_handler(_, message):
-
-    if not message.from_user:
-        return
-
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return
-
-    if len(message.text.split(None, 1)) < 2:
+    if not rows:
         await message.reply_text(
-            "❌ **Example:**\n\n"
-            "`/setwelcome ☠︎︎𝙰𝚁_乂 Hey {name}! Welcome to {chat} 👋`"
+            "📭 **No AutoReplies saved.**"
         )
         return
 
-    welcome_text = message.text.split(None, 1)[1].strip()
+    text = "🤖 ☠︎︎𝙰𝚁_乂 **𝘼𝙐𝙏𝙊𝙍𝙀𝙋𝙇𝙄𝙀𝙎**\n\n"
 
-    if len(welcome_text) > 3000:
-        await message.reply_text(
-            "❌ Welcome message too long."
-        )
-        return
+    for i, row in enumerate(rows, 1):
+        text += f"`{i}.` `{row['keyword']}`\n"
 
-    ensure_settings(message.chat.id)
-
-    db.execute(
-        "UPDATE settings SET welcome_text=? WHERE chat_id=?",
-        (welcome_text, message.chat.id)
-    )
-    db.commit()
-
-    await message.reply_text(
-        "✅ ☠︎︎𝙰𝚁_乂 **𝙒𝙀𝙇𝘾𝙊𝙈𝙀 𝙈𝙀𝙎𝙎𝘼𝙂𝙀 𝙎𝘼𝙑𝙀𝘿!**\n\n"
-        "Available placeholders:\n"
-        "`{name}`\n"
-        "`{username}`\n"
-        "`{id}`\n"
-        "`{chat}`"
-    )
-
-
-# ============================================================
-# DELETE WELCOME TEXT
-# ============================================================
-
-@app.on_message(filters.command("delwelcome") & filters.group)
-async def delwelcome_handler(_, message):
-
-    if not message.from_user:
-        return
-
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return
-
-    ensure_settings(message.chat.id)
-
-    db.execute(
-        "UPDATE settings SET welcome_text=NULL WHERE chat_id=?",
-        (message.chat.id,)
-    )
-    db.commit()
-
-    await message.reply_text(
-        "🗑️ ☠︎︎𝙰𝚁_乂 **Custom Welcome Removed!**\n"
-        "Default welcome message restored."
-    )
-
-
-# ============================================================
-# WELCOME ON/OFF
-# ============================================================
-
-@app.on_message(filters.command("welcome") & filters.group)
-async def welcome_toggle_handler(_, message):
-
-    if not message.from_user:
-        return
-
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return
-
-    ensure_settings(message.chat.id)
-
-    if len(message.command) < 2:
-
-        row = get_settings(message.chat.id)
-
-        await message.reply_text(
-            "👋 ☠︎︎𝙰𝚁_乂 **𝙒𝙀𝙇𝘾𝙊𝙈𝙀 𝙎𝙔𝙎𝙏𝙀𝙈**\n\n"
-            f"Status: **{'ON 🟢' if row['welcome'] else 'OFF 🔴'}**\n\n"
-            "`/welcome on`\n"
-            "`/welcome off`"
-        )
-        return
-
-    value = message.command[1].lower()
-
-    if value not in ("on", "off"):
-        await message.reply_text(
-            "❌ Use `/welcome on` or `/welcome off`"
-        )
-        return
-
-    state = 1 if value == "on" else 0
-
-    db.execute(
-        "UPDATE settings SET welcome=? WHERE chat_id=?",
-        (state, message.chat.id)
-    )
-    db.commit()
-
-    await message.reply_text(
-        f"👋 **Welcome {'ON 🟢' if state else 'OFF 🔴'}**"
-    )
-
-
-# ============================================================
-# GET WELCOME
-# ============================================================
-
-@app.on_message(filters.command("getwelcome") & filters.group)
-async def getwelcome_handler(_, message):
-
-    if not message.from_user:
-        return
-
-    if not await is_admin(message.chat.id, message.from_user.id):
-        return
-
-    row = get_settings(message.chat.id)
-
-    text = row["welcome_text"] or DEFAULT_WELCOME
-
-    gif_status = (
-        "🟢 SET"
-        if row["welcome_gif"]
-        else "🔴 NOT SET"
-    )
-
-    await message.reply_text(
-        "☠︎︎𝙰𝚁_乂 **𝙒𝙀𝙇𝘾𝙊𝙈𝙀 𝙎𝙀𝙏𝙏𝙄𝙉𝙂𝙎**\n\n"
-        f"👋 Welcome: **{'ON 🟢' if row['welcome'] else 'OFF 🔴'}**\n"
-        f"🎞️ GIF: **{gif_status}**\n\n"
-        "📝 **Message:**\n"
-        f"{text}"
-    )
-
-
-# ============================================================
-# WELCOME NEW MEMBERS
-# ============================================================
-
-@app.on_message(filters.new_chat_members)
-async def new_member_handler(_, message):
-
-    row = get_settings(message.chat.id)
-
-    if not row["welcome"]:
-        return
-
-    welcome_text = row["welcome_text"] or DEFAULT_WELCOME
-
-    for user in message.new_chat_members:
-
-        if user.is_self:
-            continue
-
-        text = format_welcome(
-            welcome_text,
-            user,
-            message.chat
-        )
-
-        try:
-
-            if row["welcome_gif"]:
-
-                await message.reply_animation(
-                    row["welcome_gif"],
-                    caption=text
-                )
-
-            else:
-
-                await message.reply_text(
-                    text
-                )
-
-        except Exception:
-
-            try:
-                await message.reply_text(text)
-            except Exception:
-                pass
+    await message.reply_text(text)
 
 
 # ============================================================
 # AUTOREPLY ENGINE
 # ============================================================
 
-COMMANDS = [
-    "start",
+COMMAND_NAMES = [
+    "help",
+    "ping",
+    "alive",
     "id",
     "info",
+    "stats",
     "ban",
     "unban",
+    "kick",
     "mute",
     "unmute",
     "warn",
     "unwarn",
     "del",
+    "purge",
     "pin",
     "unpin",
+    "welcome",
+    "setwelcome",
+    "getwelcome",
+    "delwelcome",
+    "setgif",
+    "delgif",
     "autoreply",
     "setreply",
     "delreply",
-    "setgif",
-    "delgif",
-    "setwelcome",
-    "delwelcome",
-    "welcome",
-    "getwelcome"
+    "replies",
 ]
 
 
 @app.on_message(
     filters.group
     & filters.text
-    & ~filters.command(COMMANDS)
+    & ~filters.command(COMMAND_NAMES)
 )
 async def autoreply_engine(_, message):
 
-    if not message.text:
+    text = message.text.lower().strip()
+
+    if not text:
         return
 
-    row = get_settings(message.chat.id)
+    row = get_chat(message.chat.id)
 
     if not row["autoreply"]:
         return
 
-    text = message.text.lower()
-
     replies = db.execute(
-        "SELECT keyword,response FROM replies WHERE chat_id=?",
+        "SELECT keyword,response FROM replies "
+        "WHERE chat_id=?",
         (message.chat.id,)
     ).fetchall()
 
@@ -1247,62 +1399,6 @@ async def autoreply_engine(_, message):
 
 
 # ============================================================
-# PRIVATE AUTO REPLY
-# ============================================================
-
-PRIVATE_AUTOREPLY = (
-    os.getenv("PRIVATE_AUTOREPLY", "false").lower()
-    == "true"
-)
-
-PRIVATE_REPLY = os.getenv(
-    "PRIVATE_REPLY",
-    "☠︎︎𝙰𝚁_乂 👋 Hello! Abhi unavailable hoon."
-)
-
-private_cooldown = set()
-
-
-@app.on_message(
-    filters.private
-    & filters.text
-    & ~filters.command(["start"])
-)
-async def private_reply(_, message):
-
-    if not PRIVATE_AUTOREPLY:
-        return
-
-    if not message.from_user:
-        return
-
-    if message.from_user.is_self:
-        return
-
-    user_id = message.from_user.id
-
-    if user_id in private_cooldown:
-        return
-
-    private_cooldown.add(user_id)
-
-    try:
-        await message.reply_text(
-            PRIVATE_REPLY
-        )
-    except Exception:
-        pass
-
-    async def cooldown():
-
-        await asyncio.sleep(60)
-
-        private_cooldown.discard(user_id)
-
-    asyncio.create_task(cooldown())
-
-
-# ============================================================
 # STARTUP
 # ============================================================
 
@@ -1311,13 +1407,13 @@ async def startup():
     me = await app.get_me()
 
     print("=" * 55)
-    print("☠︎︎𝙰𝚁_乂 𝙼𝙰𝙽𝙰𝙶𝙴𝚁")
+    print("☠︎︎𝙰𝚁_乂 MANAGER")
     print("=" * 55)
-    print(f"👤 Name     : {me.first_name}")
-    print(f"🆔 ID       : {me.id}")
-    print(f"🔗 Username : @{me.username or 'None'}")
-    print(f"💾 Database : {DB_PATH}")
-    print("🟢 Status   : ONLINE")
+    print(f"Name     : {me.first_name}")
+    print(f"ID       : {me.id}")
+    print(f"Username : @{me.username or 'None'}")
+    print(f"Database : {DB_PATH}")
+    print("Status   : ONLINE")
     print("=" * 55)
 
 
@@ -1332,11 +1428,14 @@ if __name__ == "__main__":
     app.start()
 
     try:
-        app.loop.run_until_complete(startup())
+        app.loop.run_until_complete(
+            startup()
+        )
+
         app.loop.run_forever()
 
     except KeyboardInterrupt:
-        print("Stopping...")
+        pass
 
     finally:
         app.stop()
